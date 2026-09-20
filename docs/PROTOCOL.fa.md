@@ -129,12 +129,57 @@ data: [DONE]
 ### افزونه → سرور
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.1.0","url":"https://arena.ai/agent"}
+{"type":"hello","client":"chrome-extension","version":"1.3.0","url":"https://arena.ai/agent"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"متن یا null","error":null,
- "meta":{"duration_ms":8123,"stop_reason":"stable|sse_done|sse_idle|stalled|captcha"}}
+ "meta":{"duration_ms":8123,"stop_reason":"پایین را ببینید","from_stream":false,
+         "kept_working":{"found":true,"clicked":true,"cleared":true,"input":true,"label":"Keep working"},
+         "stream":{"frames":96,"mainChars":812,"reasoningChars":0,"sawDone":true}}}
+{"type":"diag","id":"<uuid>","state":"idle|answering","busy":false,
+ "url":"https://arena.ai/agent",
+ "diag":{"selectorCounts":{"input":1,"sendButton":1},"captcha":false,"loggedIn":true},
+ "config":{"serverUrl":"ws://127.0.0.1:8000/ws/browser","stableMs":3000,"capture":true}}
 ```
+
+`diag` پاسخ فریم `diagnose` است (نسخهٔ ۱.۲.۰ به بعد)؛ دکمهٔ *Diagnose DOM* در پنل
+مدیریت و اندپوینت `/admin/api/browser/diagnose` از آن استفاده می‌کنند تا وضعیت
+زندهٔ صفحه را بدون دست‌زدن به صف ببینند. اکستنشن‌های قدیمی‌تر از ۱.۲.۰ این درخواست
+را نادیده می‌گیرند و سرور `diagnostics_timeout` گزارش می‌کند.
+
+`selectorCounts` همهٔ فهرست‌های سلکتور `config.js` (از جمله `keepWorking` و `survey`) را
+پوشش می‌دهد و `checks` دو فیلد `surveyVisible` و `keepWorkingVisible` دارد؛ وقتی فقط مسیر
+خواندنی کار می‌کند همین‌ها را ببینید.
+
+### پایان یک نوبت
+
+افزونه نوبت را با **اولین** شرطی که برقرار شود تمام می‌کند:
+
+| `stop_reason` | چه شد |
+| ------------- | ----- |
+| `stable` | متن پاسخ به مدت `STABLE_MS` تغییر نکرد |
+| `sse_done` | استریم خودِ سایت پایان را اعلام کرد |
+| `sse_idle` | استریم ضبط‌شده ساکت شد و متن ثابت بود |
+| `stream_text` | DOM عنصر پاسخ را نشان نمی‌داد، پس متن از فریم‌های `a0:` بازسازی شد |
+| `survey` | نظرسنجی پایان پاسخ در کادر چت ظاهر شد (حالت agent) |
+| `stalled` | رشد متن برای `STALL_MS` متوقف شد و دکمهٔ Stop هنوز بود - پاسخ جزئی |
+| `site_idle` | نه صفحه و نه استریم سایت برای `IDLE_STALL_MS` تغییر نکرد - بدون متن *خطا*، با متن پاسخ جزئی |
+| `timeout_partial` | مهلت درخواست رسید و متن در دست بود (`PARTIAL_ON_TIMEOUT=true`) |
+
+دو مورد آخر برای این‌اند که تب فریزشده یا پس‌زمینه هیچ‌وقت درخواست را تا timeout خود سرور
+معطل نگه ندارد: افزونه خودش توقف را گزارش می‌کند و سرور `site_idle` را به `504 page_timeout`
+(با پاسخ جزئی، اگر باشد) نگاشت می‌کند.
+
+دو قاعدهٔ دیگر هم برای مصرف‌کننده مهم است:
+
+* **فقط حالت agent** - سایت بعد از پاسخ یک نظرسنجی سه‌گزینه‌ای در کادر چت نشان می‌دهد؛
+  افزونه روی *Keep working* کلیک می‌کند (`AUTO_KEEP_WORKING`)، تا برگشتن کادر صبر می‌کند و
+  `meta.kept_working` را گزارش می‌دهد. حالت direct نظرسنجی ندارد و چیزی کلیک نمی‌شود.
+* **Keepalive** - تب پس‌زمینه `setInterval` را throttle می‌کند، پس هر تغییر DOM یا فریم
+  ضبط‌شده یک ضربان هم می‌فرستد (`HEARTBEAT_MIN_MS`)؛ بدون آن سرور کلاینتی را که مشغول
+  پاسخ دادن است حذف می‌کند.
+* `request` تکراری با همان `id` (اتصال دوبارهٔ سمت سرور) تا وقتی همان نوبت در جریان است
+  نادیده گرفته می‌شود، نه این‌که با `busy` پاسخ بگیرد.
 
 مقادیر مجاز `error`: `captcha`، `not_logged_in`، `selector_missing`، `submit_failed`،
 `no_output`، `response_timeout`، `page_error`، `busy`، `empty_prompt`، `unknown_error`.
@@ -142,12 +187,18 @@ data: [DONE]
 ### سرور → افزونه
 
 ```jsonc
-{"type":"welcome","version":"1.1.0","queue":0,"timeout_default":300}
+{"type":"welcome","version":"1.3.0","queue":0,"timeout_default":300}
 {"type":"request","id":"<uuid>","prompt":"...","mode":"agent","timeout":300}
 {"type":"ping","ts":1712345678.9}
-{"type":"cancel","id":"<uuid>","reason":"timeout"}
+{"type":"cancel","id":"<uuid>","reason":"timeout|operator"}
 {"type":"replaced","reason":"another arena.ai tab connected"}
+{"type":"diagnose","id":"<uuid>"}
+{"type":"shutdown","reason":"operator disconnected the tab"}   → close code 4004
 ```
+
+`cancel` وقتی هم می‌رسد که کسی در پنل مدیریت *Cancel* را بزند (کلاینت HTTP کد
+`499 cancelled` می‌گیرد) و `shutdown` پیش از بسته‌شدن سوکت در *Disconnect* فرستاده
+می‌شود — اکستنشن آن را «بعداً برمی‌گردم» می‌فهمد و با تأخیر ۱۰ ثانیه دوباره وصل می‌شود.
 
 ### قواعد ترتیب
 

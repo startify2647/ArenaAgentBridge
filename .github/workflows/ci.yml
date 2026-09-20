@@ -50,6 +50,8 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: DOM tests (content.js against a simulated page)
         run: node tests/extension_dom_test.mjs
+      - name: DOM tests (admin panel against a simulated browser)
+        run: node tests/webui_dom_test.mjs
       - name: Validate the Firefox package (Mozilla web-ext)
         run: npx --yes web-ext@8 lint --source-dir dist/firefox
       - name: Upload built extensions

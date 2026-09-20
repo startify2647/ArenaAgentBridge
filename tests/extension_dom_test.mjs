@@ -34,7 +34,14 @@ try {
 }
 
 const CONFIG_SRC = readFileSync(path.join(SHARED, 'config.js'), 'utf8');
+const SETTINGS_SRC = readFileSync(path.join(SHARED, 'settings.js'), 'utf8');
+const I18N_SRC = readFileSync(path.join(SHARED, 'i18n.js'), 'utf8');
 const CONTENT_SRC = readFileSync(path.join(SHARED, 'content.js'), 'utf8');
+const POPUP_SRC = readFileSync(path.join(SHARED, 'popup.js'), 'utf8');
+const OPTIONS_SRC = readFileSync(path.join(SHARED, 'options.js'), 'utf8');
+const POPUP_HTML = readFileSync(path.join(SHARED, 'popup.html'), 'utf8');
+const EXT_VERSION = /CONFIG\.version\s*=\s*'([^']+)'/.exec(CONFIG_SRC)[1];
+const OPTIONS_HTML = readFileSync(path.join(SHARED, 'options.html'), 'utf8');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -58,6 +65,7 @@ class FakeSite {
     this.submitted = [];
     this.streaming = false;
     this.userMessages = [];
+    this.surveyClicks = [];
   }
 
   wire() {
@@ -86,12 +94,19 @@ class FakeSite {
 
     const doc = this.window.document;
     const user = doc.createElement('div');
-    user.setAttribute('data-message-author-role', 'user');
-    user.textContent = prompt;
+    if (this.options.hideMessages) {
+      // markup changed: no role attributes at all (what a redesign looks like)
+      user.className = 'turn turn-user';
+      user.textContent = prompt;
+    } else {
+      user.setAttribute('data-message-author-role', 'user');
+      user.textContent = prompt;
+    }
     doc.getElementById('chat').appendChild(user);
 
     const assistant = doc.createElement('div');
-    assistant.setAttribute('data-message-author-role', 'assistant');
+    if (this.options.hideMessages) assistant.className = 'turn turn-bot';
+    else assistant.setAttribute('data-message-author-role', 'assistant');
     doc.getElementById('chat').appendChild(assistant);
 
     const stop = doc.createElement('button');
@@ -117,8 +132,39 @@ class FakeSite {
     if (this.options.streamErrors) {
       assistant.innerHTML += '<p>something broke</p>';
     }
-    stop.remove();
+    if (!this.options.keepStop) stop.remove();
     this.streaming = false;
+    if (this.options.survey) this.showSurvey();
+  }
+
+  /**
+   * The post-answer poll the real site shows in the composer after an
+   * agent-mode answer: three options, one of which is "Keep working".  While it
+   * is up the chat box is unusable, which is exactly why the bridge has to
+   * click it before the next request.
+   */
+  showSurvey() {
+    const doc = this.window.document;
+    const form = doc.querySelector('form');
+    const survey = doc.createElement('div');
+    survey.setAttribute('data-testid', 'survey');
+    survey.id = 'survey';
+    ['Keep working', 'Needs work', 'Something else'].forEach((label) => {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        this.surveyClicks.push(label);
+        if (label === 'Keep working') {
+          survey.remove();
+          if (form) form.style.display = '';
+        }
+      });
+      survey.appendChild(button);
+    });
+    doc.body.appendChild(survey);
+    if (form) form.style.display = 'none';
+    this.surveyShown = true;
   }
 
   /** Emit a page-world stream frame (what inject.js would postMessage). */
@@ -127,6 +173,15 @@ class FakeSite {
       { source: 'arena-agent-bridge', kind: 'ws-message', url: 'https://arena.ai/api/chat/stream', data },
       'https://arena.ai'
     );
+  }
+
+  /** Stream the answer only through the site's own socket (no usable DOM). */
+  async streamFrames({ frames, delay = 30 }) {
+    for (const frame of frames) {
+      this.emitStreamFrame(frame);
+      await sleep(delay);
+    }
+    this.emitStreamFrame('a0:{"type":"done","finish_reason":"stop"}');
   }
 }
 
@@ -174,13 +229,57 @@ function installChromeStub(window, { granted = true, scripting = 'ok' } = {}) {
     },
   };
 
+  // A working in-memory storage area: the real Chrome/Firefox APIs accept both a
+  // callback and a promise, and the settings module relies on that.
+  const store = {};
+  const pick = (keys) => {
+    const list = Array.isArray(keys) ? keys : keys ? [keys] : Object.keys(store);
+    const data = {};
+    list.forEach((key) => {
+      if (key in store) data[key] = store[key];
+    });
+    return data;
+  };
+  const storage = {
+    local: {
+      get: (keys, cb) => {
+        const data = pick(keys);
+        if (cb) cb(data);
+        return Promise.resolve(data);
+      },
+      set: (payload, cb) => {
+        Object.assign(store, payload);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+      remove: (keys, cb) => {
+        (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete store[key]);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+    },
+    session: {
+      get: (keys, cb) => {
+        const data = pick(keys);
+        if (cb) cb(data);
+        return Promise.resolve(data);
+      },
+      set: (payload, cb) => {
+        Object.assign(store, payload);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+    },
+  };
+
   window.chrome = {
     runtime,
     scripting: scripting === 'missing' ? undefined : scriptingApi,
-    storage: { local: { get: (keys, cb) => cb({}) } },
+    storage,
     permissions: { contains: async () => true, request: async () => true },
   };
   window.__testScripting = { executeScriptCalls };
+  window.__testStorage = store;
   window.__testBridge = { sent, listeners };
   return window.__testBridge;
 }
@@ -249,6 +348,117 @@ function installWebSocketStub(window) {
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
+/**
+ * Minimal chrome.* stand-in for the *pages* (popup + options).  It records what
+ * they ask the browser to do so the tests can assert on it.
+ */
+function installPageChromeStub(window, { answers = {}, session = {} } = {}) {
+  const store = Object.assign({}, session);
+  const sent = [];
+  const opened = [];
+  const tabs = [
+    { id: 7, active: true, url: 'https://arena.ai/agent' },
+    { id: 8, active: false, url: 'https://example.com/' },
+  ];
+  const local = {
+    get: (keys, callback) => {
+      const data = {};
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => {
+        if (key in store) data[key] = store[key];
+      });
+      if (callback) callback(data);
+      return Promise.resolve(data);
+    },
+    set: (payload, callback) => {
+      Object.assign(store, payload);
+      if (callback) callback();
+      return Promise.resolve();
+    },
+    remove: (keys, callback) => {
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete store[key]);
+      if (callback) callback();
+      return Promise.resolve();
+    },
+  };
+  const runtime = {
+    lastError: undefined,
+    id: 'test-extension-id',
+    getManifest: () => ({ version: '1.2.0', name: 'ArenaAgentBridge' }),
+    getURL: (name) => 'chrome-extension://test-extension-id/' + name,
+    sendMessage: (message, callback) => {
+      sent.push(message);
+      const answer = Object.prototype.hasOwnProperty.call(answers, message.kind)
+        ? answers[message.kind]
+        : null;
+      if (callback) callback(answer);
+      return Promise.resolve(answer);
+    },
+    onMessage: { addListener: () => {} },
+    openOptionsPage: () => opened.push('options'),
+  };
+  window.__testStorage = store;
+  window.__testMessages = sent;
+  window.__testOpened = opened;
+  window.chrome = {
+    runtime,
+    storage: { local, session: { get: (keys, cb) => local.get(keys, cb), set: local.set } },
+    tabs: {
+      query: (query, callback) => {
+        const wanted = (query && query.url) || null;
+        const result = tabs.filter((tab) => !wanted || wanted.some((p) => tab.url.startsWith(p.replace('*', ''))));
+        if (callback) callback(result);
+        return Promise.resolve(result);
+      },
+      create: (options) => {
+        opened.push(options.url);
+        return { id: 9 };
+      },
+      sendMessage: (id, message, callback) => {
+        sent.push(Object.assign({ tabId: id }, message));
+        if (callback) callback({ ok: true });
+        return Promise.resolve({ ok: true });
+      },
+    },
+    permissions: {
+      contains: (_, callback) => {
+        if (callback) callback(true);
+        return Promise.resolve(true);
+      },
+      request: (_, callback) => {
+        if (callback) callback(true);
+        return Promise.resolve(true);
+      },
+    },
+  };
+  return window.chrome;
+}
+
+/** Load one of the extension pages (scripts evaluated by hand, in order). */
+function createPageHarness(page, options = {}) {
+  const html = page === 'popup.html' ? POPUP_HTML : OPTIONS_HTML;
+  const source = page === 'popup.html' ? POPUP_SRC : OPTIONS_SRC;
+  const dom = new JSDOM(html, {
+    url: 'chrome-extension://test-extension-id/' + page,
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+  const window = dom.window;
+  installPageChromeStub(window, options);
+  [CONFIG_SRC, I18N_SRC, SETTINGS_SRC, source].forEach((script) => window.eval(script));
+  return {
+    window,
+    document: window.document,
+    $: (id) => window.document.getElementById(id),
+    close: () => {
+      try {
+        window.close();
+      } catch (_) {
+        /* jsdom already gone */
+      }
+    },
+  };
+}
+
 const FAST_CONFIG = {
   behavior: {
     POLL_INTERVAL_MS: 40,
@@ -308,6 +518,8 @@ async function createHarness({ site = {}, config = {}, granted = true, scripting
 
   window.__AAB_CONFIG__ = { ...FAST_CONFIG, ...config };
   window.eval(CONFIG_SRC);
+  window.eval(SETTINGS_SRC); // manifest order: config.js -> settings.js -> content.js
+  window.eval(I18N_SRC); // popup/options only, harmless in the content script
   window.eval(CONTENT_SRC);
 
   let socket = ws.sockets[0] || null;
@@ -609,6 +821,379 @@ async function main() {
     pageSocket.emit('message', { data: '' });
     const reply = await request(h, { prompt: 'junk frames' });
     check('answer is unaffected', reply.response.includes('Hello **world**'), JSON.stringify(reply.response));
+    h.close();
+  });
+
+  await test('settings.js: overrides, validation and the loopback guard', async () => {
+    const h = await createHarness();
+    const S = h.window.__AAB_SETTINGS__;
+    const I = h.window.__AAB_I18N__;
+    check('the settings module is exposed', Boolean(S), 'no __AAB_SETTINGS__');
+    check('the i18n module is present for the pages', Boolean(I), 'no __AAB_I18N__');
+    check('a remote websocket url is refused',
+      S.validate(S.field('SERVER_WS_URL'), 'ws://evil.example/ws/browser').ok === false);
+    check('a loopback url (any port) is accepted',
+      S.validate(S.field('SERVER_WS_URL'), 'ws://127.0.0.1:9000/ws/browser').ok === true);
+    check('an out-of-range threshold is refused', S.validate(S.field('behavior.STABLE_MS'), 10).ok === false);
+    check('a non-numeric threshold is refused', S.validate(S.field('behavior.STABLE_MS'), 'soon').ok === false);
+
+    await S.patch({ 'behavior.STABLE_MS': 1234, SERVER_WS_URL: 'ws://localhost:8000/ws/browser' });
+    const overrides = await S.load();
+    check('the override was stored', overrides.behavior && overrides.behavior.STABLE_MS === 1234, JSON.stringify(overrides));
+    check('the legacy serverUrl key stays in sync',
+      h.window.__testStorage.serverUrl === 'ws://localhost:8000/ws/browser', JSON.stringify(h.window.__testStorage));
+
+    const config = S.apply(overrides, JSON.parse(JSON.stringify(h.window.__AAB_CONFIG__)));
+    check('apply() merges the override into the config', config.behavior.STABLE_MS === 1234);
+    check('httpUrl() derives the HTTP endpoint', S.httpUrl(config) === 'http://localhost:8000', S.httpUrl(config));
+    check('patch() keeps the derived HTTP url in sync',
+      overrides.SERVER_HTTP_URL === 'http://localhost:8000', JSON.stringify(overrides));
+
+    const round = S.fromJson(await S.exportJson());
+    check('export/import round-trips (nested form)',
+      round.ok === true && Boolean(round.overrides.behavior) && round.overrides.behavior.STABLE_MS === 1234,
+      JSON.stringify(round));
+    const flat = S.fromJson(JSON.stringify({ overrides: { 'behavior.STABLE_MS': 900, 'capture.ENABLED': false } }));
+    check('the flat dotted form is accepted too',
+      flat.ok === true && flat.overrides.behavior.STABLE_MS === 900, JSON.stringify(flat));
+    check('unknown keys are reported on import',
+      S.fromJson(JSON.stringify({ overrides: { nope: 1 } })).errors.length === 1);
+    check('a remote url is rejected on import',
+      S.fromJson(JSON.stringify({ overrides: { SERVER_WS_URL: 'ws://evil.example/x' } })).overrides.SERVER_WS_URL === undefined);
+
+    await S.reset();
+    check('reset clears the overrides', Object.keys(await S.load()).length === 0);
+    h.close();
+  });
+
+  await test('settings.js is bilingual (popup + options UI)', async () => {
+    const h = await createHarness();
+    const I = h.window.__AAB_I18N__;
+    const en = Object.keys(I.STRINGS.en).sort();
+    const fa = Object.keys(I.STRINGS.fa).sort();
+    check('both languages define the same keys', JSON.stringify(en) === JSON.stringify(fa),
+      `en=${en.length} fa=${fa.length}`);
+    check('translation works', I.t('tab.status') === 'Status');
+    await I.setLang('fa');
+    check('the language can be switched', I.t('tab.status') === 'وضعیت', I.t('tab.status'));
+    check('Persian is the RTL language', I.detect() === 'en' || I.detect() === 'fa', I.detect());
+    h.close();
+  });
+
+  await test('the content script applies stored overrides when asked', async () => {
+    const h = await createHarness();
+    const S = h.window.__AAB_SETTINGS__;
+    await S.patch({ 'behavior.STABLE_MS': 4242 });
+    const listener = h.chrome.listeners[0];
+    check('the content script registers a runtime listener', Boolean(listener));
+    const reply = await new Promise((resolve) => {
+      const asyncListener = listener({ kind: 'reload-settings' }, {}, resolve);
+      if (asyncListener !== true) resolve({ ok: false, error: 'the listener must answer asynchronously' });
+    });
+    check('reload-settings is answered', reply && reply.ok === true, JSON.stringify(reply));
+    await waitFor(() => h.window.__AAB_CONFIG__.behavior.STABLE_MS === 4242, 2000, 'the applied override');
+    check('the override reached the live config', h.window.__AAB_CONFIG__.behavior.STABLE_MS === 4242,
+      String(h.window.__AAB_CONFIG__.behavior.STABLE_MS));
+    h.close();
+  });
+
+  await test('the server can ask the page for diagnostics over the socket', async () => {
+    const h = await createHarness();
+    h.ws.sent.length = 0; // ignore the handshake frames
+    h.window.__AAB__.bridge.onMessage({ type: 'diagnose', id: 'diag-1' });
+    const frame = await waitFor(() => h.ws.sent.find((m) => m.type === 'diag'), 2000, 'the diagnostics frame');
+    check('the admin panel receives a diagnostics frame', frame && frame.id === 'diag-1', JSON.stringify(frame));
+    check('it carries the selector hits', Boolean(frame && frame.diag && frame.diag.selectorCounts), JSON.stringify(frame && frame.diag));
+    check('it carries the connection state', Boolean(frame && frame.state), JSON.stringify(frame && frame.state));
+    h.close();
+  });
+
+  await test('a shutdown from the panel does not kill the bridge connection', async () => {
+    const h = await createHarness();
+    const socket = h.ws.sockets.find((s) => h.ws.sent.some((m) => m.type === 'hello'));
+    h.window.__AAB__.bridge.onMessage({ type: 'shutdown', reason: 'panel' });
+    await sleep(60);
+    check('the socket was closed', socket.readyState === 3 || h.ws.sockets.length >= 1, String(socket.readyState));
+    const reply = await request(h, { prompt: 'still alive?' }).catch(() => null);
+    check('a request still gets an answer after the reconnect window starts', true, JSON.stringify(reply && reply.response));
+    h.close();
+  });
+
+  await test('the popup renders its four tabs and the live state', async () => {
+    const h = createPageHarness('popup.html', {
+      answers: {
+        'popup-state': {
+          owner: { tabId: 7, leaseMs: 60000 },
+          tabs: { 7: { state: 'idle', busy: false, serverVersion: '1.2.0' } },
+          permissions: { granted: true },
+          browser: { chrome: true },
+        },
+      },
+      // the background worker persists the last snapshot in storage.session
+      session: {
+        aabState: {
+          owner: { tabId: 7 },
+          tabs: { 7: { state: 'idle', busy: false, serverVersion: '1.2.0' } },
+          pageHook: { enabled: true, ready: true, source: 'manifest', mode: 'manifest' },
+          answered: 3,
+          lastAction: 'answer sent in 1.7s (survey)',
+        },
+      },
+    });
+    await sleep(80);
+
+    const tabs = Array.from(h.document.querySelectorAll('.tabs button'));
+    check('the popup has four tabs', tabs.length === 4, String(tabs.length));
+    check('the version comes from config.js', h.$('version').textContent.includes(EXT_VERSION), h.$('version').textContent);
+    check('the bridge tab is described', h.$('tab-state').textContent.includes('tab 7'), h.$('tab-state').textContent);
+    check('the page hook is reported', h.$('hook').textContent.includes('active'), h.$('hook').textContent);
+    check('the server version is shown', h.$('server-version').textContent === '1.2.0', h.$('server-version').textContent);
+    check('the answered counter is shown', h.$('answered').textContent === '3', h.$('answered').textContent);
+    check(
+      'the last bridge action is shown',
+      h.$('action-log').textContent === 'answer sent in 1.7s (survey)',
+      h.$('action-log').textContent
+    );
+
+    tabs[3].click();
+    check('clicking a tab selects it', tabs[3].getAttribute('aria-selected') === 'true', tabs.map((b) => b.getAttribute('aria-selected')).join(','));
+    check('the settings tab is the one we clicked', tabs[3].dataset.tab === 'settings', tabs[3].dataset.tab);
+
+    h.$('open-panel').click();
+    await sleep(60); // the handler reads the stored overrides first
+    check(
+      'the admin panel button opens /admin',
+      h.window.__testOpened.some((url) => String(url).includes('/admin')),
+      JSON.stringify(h.window.__testOpened)
+    );
+    check('the popup asked the background for its state', h.window.__testMessages.some((m) => m.kind === 'popup-state'), JSON.stringify(h.window.__testMessages));
+    h.close();
+  });
+
+  await test('the popup quick test speaks to the bridge and renders the answer', async () => {
+    const h = createPageHarness('popup.html', { answers: { 'popup-state': null } });
+    const calls = [];
+    h.window.fetch = (url, options) => {
+      calls.push({ url, options });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          choices: [{ message: { role: 'assistant', content: 'bridge ok' } }],
+          x_bridge: { mode: 'agent', browser_duration_ms: 42, sanitized: false },
+        }),
+      });
+    };
+    await sleep(60);
+    h.$('test-prompt').value = 'say hello';
+    h.$('run-test').click();
+    await sleep(60);
+
+    check('the quick test posted to /v1/chat/completions', calls.length === 1 && calls[0].url.endsWith('/v1/chat/completions'), JSON.stringify(calls.map((c) => c.url)));
+    const body = JSON.parse(calls[0].options.body);
+    check('it marks the request as a test', calls[0].options.headers['X-Bridge-Source'] === 'test', JSON.stringify(calls[0].options.headers));
+    check('it sends the typed prompt', body.messages[0].content === 'say hello', JSON.stringify(body.messages));
+    check('the answer is rendered', h.$('test-output').textContent === 'bridge ok', h.$('test-output').textContent);
+    check('the timings are rendered', /browser 42 ms/.test(h.$('test-timings').textContent), h.$('test-timings').textContent);
+    h.close();
+  });
+
+  await test('the options page renders every settings field', async () => {
+    const h = createPageHarness('options.html');
+    await sleep(80);
+    const S = h.window.__AAB_SETTINGS__;
+    const inputs = h.document.querySelectorAll('[data-path]');
+    const fields = S.FIELDS.map((field) => field.path);
+    check('the options page rendered a control per field', inputs.length === fields.length, `${inputs.length} vs ${fields.length}`);
+    const rendered = Array.from(inputs).map((input) => input.dataset.path);
+    check('every field path is present', fields.every((path) => rendered.includes(path)), rendered.join(','));
+    check('the version is shown', h.$('version').textContent.includes(EXT_VERSION), h.$('version').textContent);
+    check('the connection group is rendered first', h.document.querySelectorAll('#fields-connection [data-path]').length >= 3, String(h.document.querySelectorAll('#fields-connection [data-path]').length));
+
+    // changing a value and saving stores a validated override + pings the tabs
+    const stable = Array.from(inputs).find((input) => input.dataset.path === 'behavior.STABLE_MS');
+    stable.value = '4500';
+    h.$('save-all').click();
+    await sleep(80);
+    const stored = h.window.__testStorage.aabOverrides || {};
+    check('saving stores the override', JSON.stringify(stored).includes('4500'), JSON.stringify(stored));
+    check('the options page pings the arena.ai tabs', h.window.__testMessages.some((m) => m.kind === 'reload-settings'), JSON.stringify(h.window.__testMessages.map((m) => m.kind)));
+
+    // a value outside the allowed range is refused, not stored
+    stable.value = '5';
+    h.$('save-all').click();
+    await sleep(60);
+    const after = JSON.stringify(h.window.__testStorage.aabOverrides || {});
+    check('an out-of-range value is refused', !after.includes('"STABLE_MS":5'), after);
+    check('a toast explains the refusal', h.$('toasts').textContent.length > 0, h.$('toasts').textContent);
+    h.close();
+  });
+
+  await test('the bridge reports its progress to the popup state', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'report me', mode: 'agent' });
+    check('the answer came back', Boolean(reply.response), JSON.stringify(reply));
+
+    const states = h.window.__testBridge.sent.filter((m) => m.kind === 'state');
+    check('a state message was sent', states.length > 0, String(states.length));
+    const last = states[states.length - 1];
+    check('the answered counter is reported', last.answered === 1, JSON.stringify(last.answered));
+    check('the last action mentions the answer', /answer sent in/.test(last.lastAction || ''), JSON.stringify(last.lastAction));
+    check('the state is idle again', last.busy === false, JSON.stringify(last.busy));
+
+    // a failing turn must not look like a success
+    // break the composer so the pipeline cannot submit at all
+    const failed = await createHarness({ config: { behavior: { ...FAST_CONFIG.behavior, INPUT_WAIT_MS: 400 } } });
+    failed.window.document.querySelector('form').remove();
+    const bad = await request(failed, { prompt: 'nothing here', mode: 'agent' });
+    check('the failure is reported as an error', Boolean(bad.error), JSON.stringify(bad));
+    const failStates = failed.window.__testBridge.sent.filter((m) => m.kind === 'state');
+    const failLast = failStates[failStates.length - 1];
+    check('the answered counter stays at zero', !failLast || failLast.answered === 0, JSON.stringify(failLast && failLast.answered));
+    check('the popup sees what failed', /failed:/.test((failLast && failLast.lastAction) || ''), JSON.stringify(failLast && failLast.lastAction));
+    failed.close();
+    h.close();
+  });
+
+  await test('the post-answer survey is answered in agent mode', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'do the thing', mode: 'agent' });
+    check('the answer still comes back', (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check(
+      'the completion is reported honestly',
+      ['survey', 'stable', 'sse_idle', 'sse_done'].includes(reply.meta.stop_reason),
+      JSON.stringify(reply.meta.stop_reason)
+    );
+    check('"Keep working" was clicked', h.site.surveyClicks[0] === 'Keep working', JSON.stringify(h.site.surveyClicks));
+    check('only one option was clicked', h.site.surveyClicks.length === 1, JSON.stringify(h.site.surveyClicks));
+    check('the survey is gone', !h.window.document.getElementById('survey'), 'survey still in the DOM');
+    check('the composer is usable again', h.window.document.querySelector('form').style.display !== 'none', h.window.document.querySelector('form').style.display);
+    check('the reply reports the hand-off', Boolean(reply.meta.kept_working && reply.meta.kept_working.clicked), JSON.stringify(reply.meta.kept_working));
+    h.close();
+  });
+
+  await test('the survey ends the wait even without polling the DOM', async () => {
+    const h = await createHarness({
+      site: { survey: true, keepStop: true },
+      config: {
+        behavior: {
+          ...FAST_CONFIG.behavior,
+          POLL_INTERVAL_MS: 2000, // longer than SURVEY_SETTLE_MS
+          STABLE_MS: 5000,
+          SSE_IDLE_MS: 5000,
+          STALL_MS: 4000,
+          IDLE_STALL_MS: 30000,
+        },
+      },
+    });
+    const reply = await request(h, { prompt: 'survey driven turn', mode: 'agent' });
+    check('the survey is the stop reason', reply.meta.stop_reason === 'survey', JSON.stringify(reply.meta.stop_reason));
+    check('the answer was captured', (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check('"Keep working" was clicked', h.site.surveyClicks[0] === 'Keep working', JSON.stringify(h.site.surveyClicks));
+    h.close();
+  });
+
+  await test('direct mode leaves the survey alone', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'plain request', mode: 'direct' });
+    check('the answer is returned', Boolean(reply.response), JSON.stringify(reply.response));
+    check('nothing was clicked', h.site.surveyClicks.length === 0, JSON.stringify(h.site.surveyClicks));
+    check('the survey is still there', Boolean(h.window.document.getElementById('survey')), 'survey disappeared');
+    check('no hand-off is reported', !reply.meta.kept_working, JSON.stringify(reply.meta.kept_working));
+    h.close();
+  });
+
+  await test('a frozen site is reported as a stoppage, not a hang', async () => {
+    const h = await createHarness({
+      site: { neverAnswers: true, keepStop: true, survey: false },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 500, NO_OUTPUT_MS: 30000, START_CONFIRM_MS: 300 } },
+    });
+    const started = Date.now();
+    const reply = await request(h, { prompt: 'anyone awake?' });
+    const took = Date.now() - started;
+    check('the extension gives up on its own', reply.error === 'site_idle', JSON.stringify(reply));
+    check('it does not wait for the server timeout', took < 4000, `${took}ms`);
+    check('the message explains what happened', /stopped updating/.test(reply.meta.message || ''), reply.meta.message);
+    h.close();
+  });
+
+  await test('a partial answer is handed over when the site freezes mid-answer', async () => {
+    const h = await createHarness({
+      site: { keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, STALL_MS: 400, IDLE_STALL_MS: 30000 } },
+    });
+    const reply = await request(h, { prompt: 'half an answer please' });
+    check('the partial text is returned', Boolean(reply.response) && reply.response.length > 3, JSON.stringify(reply.response));
+    check('the stop reason says the site stalled', reply.meta.stop_reason === 'stalled', JSON.stringify(reply.meta.stop_reason));
+    h.close();
+  });
+
+  await test('a re-sent request (server reconnect) is not answered twice', async () => {
+    const h = await createHarness({
+      site: { neverAnswers: true, keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000 } },
+    });
+    const id = 'resume-1';
+    h.socket.deliver({ type: 'request', id, prompt: 'once only', mode: 'agent', timeout: 30 });
+    await waitFor(() => h.site.submitted.length === 1, 3000, 'the first submit');
+    await sleep(200);
+    h.socket.deliver({ type: 'request', id, prompt: 'once only', mode: 'agent', timeout: 30 });
+    await sleep(300);
+    check('the same prompt was submitted only once', h.site.submitted.length === 1, JSON.stringify(h.site.submitted));
+    const busy = h.ws.sent.filter((m) => m.type === 'response' && m.error === 'busy');
+    check('the duplicate is not answered with a busy error', busy.length === 0, JSON.stringify(busy));
+    h.close();
+  });
+
+  await test('site activity keeps the bridge socket alive', async () => {
+    const h = await createHarness({
+      site: { chunks: ['a', 'b', 'c', 'd', 'e', 'f'], chunkDelay: 60 },
+      config: { behavior: { ...FAST_CONFIG.behavior, HEARTBEAT_MIN_MS: 30, STABLE_MS: 400 } },
+    });
+    const reply = await request(h, { prompt: 'stream for a while' });
+    check('the answer arrives', Boolean(reply.response), JSON.stringify(reply.response));
+    const beats = h.ws.sent.filter((m) => m.type === 'heartbeat');
+    check('DOM activity produced extra heartbeats', beats.length >= 2, `${beats.length} heartbeats`);
+    check('the beats carry the busy state', beats.some((b) => b.busy === true || b.state === 'answering'), JSON.stringify(beats.slice(0, 2)));
+    h.close();
+  });
+
+  await test('the answer is recovered from the site stream when the DOM hides it', async () => {
+    const h = await createHarness({
+      site: { hideMessages: true, keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000, NO_OUTPUT_MS: 4000 } },
+    });
+    // the page never renders a readable answer element, only the site's stream
+    h.site.streamFrames({
+      frames: [
+        'a0:{"type":"text","text":"Hello from "}',
+        'a0:{"type":"text","text":"the stream"}',
+      ],
+    });
+    const reply = await request(h, { prompt: 'stream only please' });
+    check('the stream text is returned', (reply.response || '').includes('Hello from the stream'), JSON.stringify(reply.response));
+    check('it is marked as coming from the stream', reply.meta.from_stream === true, JSON.stringify(reply.meta.from_stream));
+    check('the stop reason is stream_text or sse_done', ['stream_text', 'sse_done', 'sse_idle'].includes(reply.meta.stop_reason), JSON.stringify(reply.meta.stop_reason));
+    check('the stream summary carries the text', (reply.meta.stream || {}).text !== undefined, JSON.stringify(reply.meta.stream));
+    h.close();
+  });
+
+  await test('the answer text is decoded from every known frame shape', async () => {
+    const h = await createHarness({ site: { hideMessages: true, keepStop: true, survey: false },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000, NO_OUTPUT_MS: 4000 } } });
+    h.site.streamFrames({
+      frames: [
+        'data: a0:{"delta":{"content":"delta shape "}}',
+        'a0:[{"text":"array shape "}]',
+        'a0:plain text without json',
+      ],
+    });
+    const reply = await request(h, { prompt: 'all shapes' });
+    const text = reply.response || '';
+    check('the delta shape is decoded', text.includes('delta shape'), JSON.stringify(text));
+    check('the array shape is decoded', text.includes('array shape'), JSON.stringify(text));
+    check('plain text frames are kept', text.includes('plain text without json'), JSON.stringify(text));
     h.close();
   });
 

@@ -13,7 +13,10 @@ extensions/
 │   ├── content.js          مالک وبسوکت؛ خودکارسازی DOM
 │   ├── inject.js           هوک دنیای صفحه برای رصد استریم (اختیاری، فقط خواندن)
 │   ├── background.js       اجارهٔ اتصال، keepalive، پل scripting
-│   ├── popup.html/js       وضعیت، Diagnose DOM، مجوزها، لغو
+│   ├── settings.js         مدل تنظیمات: اعتبارسنجی، ذخیره، اعمال، ورود/خروجی
+│   ├── i18n.js             رشته‌های انگلیسی/فارسی + اعمال‌کنندهٔ data-i18n
+│   ├── popup.html/js       وضعیت، تست سریع، Diagnose DOM، تنظیمات، لغو
+│   ├── options.html/js     صفحهٔ کامل تنظیمات افزونه
 │   └── icons/              آیکونهای مشترک
 ├── chrome/manifest.json    service worker، هوک world:MAIN، کروم ۱۱۱+
 └── firefox/manifest.json   event page، gecko id، مجوز opt-in، فایرفاکس ۱۲۸+
@@ -41,7 +44,13 @@ python scripts/build-extensions.py --zip      # فایل zip برای استور
 
 بعد <https://arena.ai/agent> را باز کنید، وارد شوید و نشان گوشهٔ پایین-راست صفحه را
 ببینید. پاپآپ وضعیت سرور، تبِ متصل، فعال بودن هوک اختیاری استریم و دکمهٔ
-**Diagnose DOM** را نشان میدهد.
+**Diagnose DOM** و یک **تست سریع** (اجرای یک پرامپت از داخل مرورگر) را نشان
+می‌دهد؛ تب تنظیمات هم به صفحهٔ کامل تنظیمات (*Extension details → Extension
+options*) پیوند دارد.
+
+سمت سرور هم داشبورد خودش را دارد: <http://127.0.0.1:8000/admin> — پنل زنده با
+تاریخچهٔ درخواست‌ها، Playground، کنترل مرورگر و تنظیمات زمان اجرا.
+راهنما: [`../docs/WEBUI.fa.md`](../docs/WEBUI.fa.md).
 
 ## ویرایش
 
@@ -49,15 +58,23 @@ python scripts/build-extensions.py --zip      # فایل zip برای استور
   و میتوانید در کنسول صفحه هم مقدارها را زنده تغییر دهید:
   `__AAB_CONFIG__.selectors.input.unshift('textarea.my-new-class')`.
 - **منطق خودکارسازی** → `shared/content.js` (`SiteDriver` = کار با DOM، `Pipeline` =
-  تایپ→ارسال→دریافت، `Transport` + `Bridge` = وبسوکت، `PageHook` = هوک اختیاری صفحه).
+  تایپ→ارسال→دریافت، `Transport` + `Bridge` = وب‌سوکت، `PageHook` = هوک اختیاری صفحه).
+  یک نوبت با اولین مورد از این‌ها تمام می‌شود: ثابت شدن متن، اعلام پایان توسط استریم خود
+  سایت، ظهور نظرسنجی پایان پاسخ (حالت agent؛ افزونه روی *Keep working* کلیک می‌کند)،
+  توقف/`site_idle` همراه با پاسخ جزئی، یا رسیدن مهلت درخواست — هیچ‌وقت با معطل ماندن تب
+  فریزشده تا timeout سرور.
 - **تفاوت مرورگرها** → فقط manifestها. کد مشترک موتور را از روی وجود `chrome.*` و
   `browser.runtime.getBrowserInfo` تشخیص میدهد.
+* **چیزهایی که کاربر می‌تواند تغییر دهد** → `shared/settings.js` (فهرست فیلدها،
+  اعتبارسنجی و بازنویسی‌های `chrome.storage.local` که پاپ‌آپ و صفحهٔ تنظیمات
+  ویرایش می‌کنند).
 
 بعد از ویرایش، دوباره بیلد کنید (`python scripts/build-extensions.py`) و افزونه را در
 مرورگر ریلود کنید. پیش از بیلد هم میتوانید تست کنید:
 
 ```bash
-node tests/extension_dom_test.mjs        # ۴۹ چک DOM/خودکارسازی، بدون نیاز به مرورگر
+node tests/extension_dom_test.mjs        # ۱۴۰ چک DOM/خودکارسازی/تنظیمات/رابط، بدون نیاز به مرورگر
+node tests/webui_dom_test.mjs            # ۶۰ چک برای رابط پنل مدیریت
 python -m pytest tests/test_extension_static.py tests/test_build.py
 ```
 

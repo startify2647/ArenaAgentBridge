@@ -30,8 +30,9 @@ test: test-server test-dom ## run everything that does not need a browser
 test-server: ## python test suite (server, build, static extension checks)
 	$(VENV)/bin/python -m pytest -q
 
-test-dom: ## jsdom test suite for the extension automation
+test-dom: ## jsdom suites: extension automation + admin panel
 	node tests/extension_dom_test.mjs
+	node tests/webui_dom_test.mjs
 
 lint: ## ruff + JavaScript syntax + manifest JSON
 	$(VENV)/bin/ruff check .

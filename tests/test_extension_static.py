@@ -184,3 +184,91 @@ def test_extensions_have_no_stale_duplicates():
             f"extensions/{browser} should only contain manifest.json (found {[p.name for p in folder.iterdir()]})"
         )
     assert not (ROOT / "extension").exists(), "the old extension/ folder must be gone"
+
+
+# ---------------------------------------------------------------------------
+# the extension UI (popup + options page) and its settings layer
+# ---------------------------------------------------------------------------
+UI_PAGES = ("popup.html", "options.html")
+UI_SCRIPTS = ("settings.js", "i18n.js", "popup.js", "options.js")
+
+
+def test_ui_pages_and_scripts_exist():
+    for name in (*UI_PAGES, *UI_SCRIPTS):
+        assert (SHARED / name).is_file(), f"extensions/shared/{name} is missing"
+
+
+def test_both_manifests_expose_the_options_page(chrome_manifest, firefox_manifest):
+    for manifest in (chrome_manifest, firefox_manifest):
+        options = manifest.get("options_ui") or {}
+        assert options.get("page") == "options.html"
+        assert options.get("open_in_tab") is True, "options must open in a tab (room to think)"
+        assert (SHARED / options["page"]).is_file()
+
+
+def test_ui_pages_are_self_contained_and_script_driven():
+    """No CDN, no inline handlers - the pages must survive an offline machine."""
+    for name in UI_PAGES:
+        html = (SHARED / name).read_text(encoding="utf-8")
+        assert "settings.js" in html and "i18n.js" in html, f"{name} must load the shared modules"
+        assert html.index("settings.js") < html.index(name.replace(".html", ".js")), (
+            f"{name} must load settings.js before its own script"
+        )
+        assert 'src="http' not in html and "cdn." not in html, f"{name} pulls a remote asset"
+        for inline in ("onclick=", "onchange=", "onload=", "onerror="):
+            assert inline not in html, f"{name} uses {inline} (blocked by the extension CSP)"
+        assert "<style>" in html, f"{name} should carry its own styles"
+
+
+def test_content_script_loads_the_settings_layer(chrome_manifest, firefox_manifest):
+    for manifest in (chrome_manifest, firefox_manifest):
+        js = manifest["content_scripts"][0]["js"]
+        assert js == ["config.js", "settings.js", "content.js"], js
+
+
+def test_settings_fields_are_bilingual_and_cover_the_config_knobs():
+    source = (SHARED / "settings.js").read_text(encoding="utf-8")
+    config = (SHARED / "config.js").read_text(encoding="utf-8")
+    fields = re.findall(r"path: '([^']+)', group: '([^']+)'", source)
+    assert len(fields) >= 15, f"the settings model lost fields ({len(fields)} found)"
+    for path, group in fields:
+        assert group in {"connection", "automation", "capture", "advanced"}, f"{path}: odd group {group}"
+        leaf = path.split(".")[-1]
+        assert leaf in config, f"{path} does not exist in config.js"
+    # every field needs a Persian label/help for the bilingual UI
+    assert source.count("label_fa:") == len(fields)
+    assert source.count("help_fa:") == len(fields)
+    for needle in ("aabOverrides", "serverUrl", "LOOPBACK_WS", "exportJson", "fromJson", "httpUrl"):
+        assert needle in source, f"settings.js lost {needle}"
+
+
+def test_i18n_dictionaries_stay_in_sync():
+    source = (SHARED / "i18n.js").read_text(encoding="utf-8")
+
+    def keys(block: str) -> list:
+        return sorted(re.findall(r"'([a-z0-9_.]+)':", block))
+
+    english = source[source.index("en: {"): source.index("fa: {")]
+    persian = source[source.index("fa: {"):]
+    en_keys, fa_keys = keys(english), keys(persian)
+    assert len(en_keys) > 20, "the dictionary looks truncated"
+    assert en_keys == fa_keys, f"untranslated: {sorted(set(en_keys) - set(fa_keys))}"
+    assert "dir" in source and "rtl" in source, "the Persian UI must switch the layout to RTL"
+    assert "aabLang" in source, "the language choice is not remembered"
+
+
+def test_ui_scripts_are_api_safe():
+    """The UI scripts must not reach beyond the extension APIs they need."""
+    for name in UI_SCRIPTS:
+        source = (SHARED / name).read_text(encoding="utf-8")
+        assert "eval(" not in source and "new Function(" not in source
+        assert "document.cookie" not in source
+        for match in re.finditer(r"https?://([a-z0-9.-]+)", source, re.I):
+            assert match.group(1) in {"arena.ai", "127.0.0.1", "localhost", "github.com"}, match.group(0)
+
+
+def test_popup_links_to_the_admin_panel():
+    popup = (SHARED / "popup.js").read_text(encoding="utf-8")
+    assert "/admin" in popup, "the popup must be able to open the server's admin panel"
+    assert "__AAB_SETTINGS__" in popup, "the popup must reuse the shared settings model"
+    assert "httpUrl" in popup, "the popup must derive the HTTP url from the websocket url"

@@ -13,13 +13,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List
 
-import httpx
 import pytest
+from conftest import (
+    attach_browser,
+    make_settings,
+    plain_answer,
+)
 
 from server.config import Settings
-from server.main import create_app
 from server.mock_browser import FakeWebSocket
 from server.models import ChatMessage
 from server.prompt_builder import PromptBuildError, build_prompt
@@ -30,107 +33,6 @@ from server.websocket_manager import BridgeError
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-class ScriptedBrowser:
-    """A fake extension: answers every request with a scripted payload."""
-
-    def __init__(self, answer: Callable[[Dict[str, Any]], Dict[str, Any]], delay: float = 0.0):
-        self.answer = answer
-        self.delay = delay
-        self.ws = FakeWebSocket()
-        self.bridge = None
-        self.client = None
-        self.seen: List[Dict[str, Any]] = []
-        self.concurrent = 0
-        self.max_concurrent = 0
-        self._task: Optional[asyncio.Task] = None
-
-    async def start(self, bridge) -> "ScriptedBrowser":
-        self.bridge = bridge
-        self.client = await bridge.connect(self.ws, {"client": "scripted", "version": "test"})
-        self._task = asyncio.create_task(self._loop())
-        return self
-
-    async def stop(self, bridge) -> None:
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        if self.client is not None:
-            await bridge.disconnect(self.client)
-
-    async def _loop(self) -> None:
-        seen = 0
-        while True:
-            await asyncio.sleep(0.01)
-            while seen < len(self.ws.sent):
-                payload = self.ws.sent[seen]
-                seen += 1
-                if payload.get("type") == "request":
-                    asyncio.create_task(self._handle(payload))
-
-    async def _handle(self, payload: Dict[str, Any]) -> None:
-        self.concurrent += 1
-        self.max_concurrent = max(self.max_concurrent, self.concurrent)
-        try:
-            if self.delay:
-                await asyncio.sleep(self.delay)
-            self.seen.append(payload)
-            body = self.answer(payload)
-            await self.bridge_handle(payload, body)
-        finally:
-            self.concurrent -= 1
-
-    async def bridge_handle(self, payload: Dict[str, Any], body: Dict[str, Any]) -> None:
-        assert self.bridge is not None and self.client is not None
-        await self.bridge.handle_message(
-            self.client, {"type": "response", "id": payload["id"], **body}
-        )
-
-
-def make_settings(**overrides) -> Settings:
-    settings = Settings()
-    settings.validate()
-    for key, value in overrides.items():
-        setattr(settings, key, value)
-    settings.model_ids = [settings.model_id, *settings.extra_model_ids]
-    settings.validate()
-    return settings
-
-
-@pytest.fixture
-async def settings() -> Settings:
-    return make_settings(stream_chunk_delay_ms=0, stream_chunk_chars=16)
-
-
-@pytest.fixture
-async def api(settings):
-    """An app with NO browser connected (plus a scripted one on request)."""
-    app = create_app(settings)
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://bridge.test", timeout=30.0
-        ) as client:
-            yield app, client
-
-
-async def attach_browser(app, answer, delay: float = 0.0) -> ScriptedBrowser:
-    return await ScriptedBrowser(answer, delay=delay).start(app.state.bridge)
-
-
-def plain_answer(text: str = "the answer") -> Callable[[Dict[str, Any]], Dict[str, Any]]:
-    def _answer(_payload: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "response": text,
-            "error": None,
-            "meta": {"duration_ms": 12, "stop_reason": "stable"},
-        }
-
-    return _answer
-
-
 # ---------------------------------------------------------------------------
 # prompt assembly
 # ---------------------------------------------------------------------------
@@ -505,6 +407,10 @@ async def test_bridge_error_mapping():
     assert BrowserBridge._bridge_error_for("no_tab", {}).status_code == 503
     assert BrowserBridge._bridge_error_for("timeout", {}).code == "page_timeout"
     assert BrowserBridge._bridge_error_for("selector_missing", {}).code == "dom_changed"
+    # a frozen tab is reported by the extension itself (no server-side waiting)
+    idle = BrowserBridge._bridge_error_for("site_idle", {})
+    assert idle.code == "page_timeout" and idle.status_code == 504
+    assert "stopped changing" in idle.message
     custom = BrowserBridge._bridge_error_for("weird_thing", {"message": "boom", "status_code": 418})
     assert custom.status_code == 418 and custom.message == "boom"
 
