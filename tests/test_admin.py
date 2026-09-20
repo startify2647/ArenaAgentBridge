@@ -49,7 +49,8 @@ async def test_panel_page_points_at_nothing_remote(api):
     csp = (await client.get("/admin")).headers["content-security-policy"]
     assert "default-src 'none'" in csp
     assert "connect-src 'self'" in csp
-    assert "frame-ancestors 'self'" in csp
+    assert "form-action 'none'" in csp
+    assert "frame-ancestors" not in csp, "the panel must stay embeddable (local previews)"
 
 
 async def test_panel_config_matches_the_server(api):

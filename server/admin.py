@@ -386,10 +386,14 @@ def render_panel_page(settings: Settings) -> HTMLResponse:
         headers={
             "Cache-Control": "no-store",
             "X-Robots-Tag": "noindex",
+            # No `frame-ancestors`: the panel is a local page you may want to
+            # embed in your own dashboard (or view through a remote preview of
+            # your dev box).  Cross-site POSTs still need a CORS preflight
+            # (JSON body), and `default-src 'none'` keeps remote code out.
             "Content-Security-Policy": (
                 "default-src 'none'; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
-                "img-src 'self' data:; form-action 'none'; frame-ancestors 'self'"
+                "img-src 'self' data:; form-action 'none'"
             ),
         },
     )
