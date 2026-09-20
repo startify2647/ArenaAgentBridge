@@ -76,7 +76,7 @@ to a documented HTTP status and an OpenAI-shaped error body.
 ### 1. Start the server
 
 ```bash
-git clone https://github.com/startify2647/startify.git arena-agent-bridge
+git clone https://github.com/startify2647/ArenaAgentBridge.git arena-agent-bridge
 cd arena-agent-bridge
 
 ./scripts/run.sh                 # creates .venv, installs deps, listens on 127.0.0.1:8000

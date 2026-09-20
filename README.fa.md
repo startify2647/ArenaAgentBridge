@@ -155,7 +155,7 @@ extensions/
 ### گام ۱ — راهاندازی سرور
 
 ```bash
-git clone https://github.com/startify2647/startify.git arena-agent-bridge
+git clone https://github.com/startify2647/ArenaAgentBridge.git arena-agent-bridge
 cd arena-agent-bridge
 
 ./scripts/run.sh                 # ساخت .venv، نصب وابستگیها، اجرا روی 127.0.0.1:8000
