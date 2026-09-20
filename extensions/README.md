@@ -1,5 +1,7 @@
 # Extensions
 
+[فارسی](README.fa.md) · [README فارسی](../README.fa.md)
+
 One shared codebase, two browser packages, one build step.
 
 ```

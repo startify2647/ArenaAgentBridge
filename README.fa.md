@@ -10,7 +10,7 @@ Open WebUI یا حتی `curl`) را به رابط وب [Arena.ai](https://arena.
 مرورگر واقعی که همان کاری را میکند که همیشه میکند، بهعلاوهٔ یک سرور FastAPI و یک
 کدبیس افزونه برای **کروم/اج** و **فایرفاکس**.
 
-[English README](README.md) · [مستندات پروتکل](docs/PROTOCOL.md) · [عیبیابی](docs/TROUBLESHOOTING.md) · [فایرفاکس](docs/FIREFOX.md) · [اتصال ایجنتها](docs/HERMES_OPENCLAW.md)
+[English README](README.md) · [مستندات پروتکل](docs/PROTOCOL.fa.md) · [عیبیابی](docs/TROUBLESHOOTING.fa.md) · [فایرفاکس](docs/FIREFOX.fa.md) · [اتصال ایجنتها](docs/HERMES_OPENCLAW.fa.md)
 
 > ⚠️ **اول این را بخوانید.** خودکارسازی سایت به این شکل احتمالاً ناقض شرایط استفادهٔ
 > Arena.ai است و ممکن است به محدود یا مسدود شدن حساب منجر شود. این پروژه «دور زدن»
@@ -30,7 +30,7 @@ Open WebUI یا حتی `curl`) را به رابط وب [Arena.ai](https://arena.
 | مسیر اصلی | `POST /v1/chat/completions` (سازگار با OpenAI) |
 | مدلها | `arena-agent` و `arena-agent-direct` |
 | ترافیک | فقط لوکالهاست؛ هیچ دادهای بیرون از سیستم نمیرود |
-| تستها | ۸۱ تست پایتون + ۴۹ چک jsdom — بدون نیاز به مرورگر |
+| تستها | ۱۰۴ تست پایتون + ۴۹ چک jsdom — بدون نیاز به مرورگر |
 
 ---
 
@@ -193,7 +193,7 @@ python scripts/build-extensions.py     # خروجی در dist/chrome و dist/fir
 
 > در فایرفاکس مجوزهای میزبان **opt-in** هستند؛ تا زمانی که مجوز ندهید خطای
 > `browser_offline` میگیرید. افزونههای موقت با بستن مرورگر حذف میشوند؛ گزینههای
-> نصب دائمی در [docs/FIREFOX.md](docs/FIREFOX.md) آمده است.
+> نصب دائمی در [docs/FIREFOX.fa.md](docs/FIREFOX.fa.md) آمده است.
 
 ### گام ۳ — اولین درخواست
 
@@ -237,7 +237,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 - همزمانی را روی ۱ بگذارید؛ درخواستهای اضافه در صف میمانند.
 - برای کارهای طولانی، `AAB_REQUEST_TIMEOUT=900` را در `.env` بگذارید.
 
-دستورهای کامل برای هر کلاینت: [docs/HERMES_OPENCLAW.md](docs/HERMES_OPENCLAW.md).
+دستورهای کامل برای هر کلاینت: [docs/HERMES_OPENCLAW.fa.md](docs/HERMES_OPENCLAW.fa.md).
 
 ---
 
@@ -323,7 +323,7 @@ __AAB__.diagnose();
 افزونه → سرور: `hello`، `heartbeat`، `pong`،
 `response {id, response, error, meta}`
 
-شرح کامل: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+شرح کامل: [docs/PROTOCOL.fa.md](docs/PROTOCOL.fa.md).
 
 ---
 
@@ -334,7 +334,7 @@ make help          # فهرست همهٔ کارها
 make install       # ساخت .venv + وابستگیها + jsdom
 make run           # اجرای سرور پل
 make demo          # دموی بدون مرورگر
-make test          # ۸۱ تست پایتون + ۴۹ چک jsdom (بدون مرورگر)
+make test          # ۱۰۴ تست پایتون + ۴۹ چک jsdom (بدون مرورگر)
 make lint          # ruff + بررسی سینتکس JS + اعتبار manifestها
 make build         # ساخت dist/chrome و dist/firefox
 make firefox-lint  # اعتبارسنجی بستهٔ فایرفاکس با ابزار موزیلا
@@ -360,7 +360,7 @@ curl -s http://127.0.0.1:8000/v1/bridge/status  # وضعیت کامل
 | پاسخ ناقص یا چسبیدن نوبت قبل | `STABLE_MS` و `SSE_IDLE_MS` و سلکتور پیام assistant را تنظیم کنید |
 | کندی زیاد | پل تکدرخواستی است؛ تب را در پنجرهٔ جدا نگه دارید و برای پرامپتهای کوتاه از حالت `direct` استفاده کنید |
 
-فهرست کامل: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+فهرست کامل: [docs/TROUBLESHOOTING.fa.md](docs/TROUBLESHOOTING.fa.md).
 
 ---
 
@@ -416,7 +416,8 @@ arena-agent-bridge/
 │   └── dev_ws_client.py         # مرورگر جعلی خط فرمان
 ├── scripts/                     # run.sh, demo.sh, build-extensions.py,
 │                                # firefox-dev.sh, make_icons.py
-├── docs/                        # PROTOCOL, TROUBLESHOOTING, HERMES_OPENCLAW, FIREFOX
+├── docs/                        # PROTOCOL, TROUBLESHOOTING, HERMES_OPENCLAW,
+│                                # FIREFOX — هر کدام + نسخهٔ فارسی .fa.md
 ├── Makefile                     # make help
 └── .github/workflows/ci.yml     # CI: تستها + بیلد + web-ext lint
 ```

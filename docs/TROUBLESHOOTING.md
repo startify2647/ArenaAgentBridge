@@ -1,5 +1,7 @@
 # Troubleshooting
 
+[فارسی](TROUBLESHOOTING.fa.md) · [README فارسی](../README.fa.md)
+
 Start with the built-in diagnostics - they answer most questions in one shot:
 
 ```bash

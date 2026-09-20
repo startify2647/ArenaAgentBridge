@@ -1,5 +1,7 @@
 # ArenaAgentBridge protocol
 
+[فارسی](PROTOCOL.fa.md) · [README فارسی](../README.fa.md)
+
 Two interfaces exist:
 
 1. **HTTP** (localhost:8000) - what Hermes/OpenClaw/curl speak: OpenAI Chat Completions.

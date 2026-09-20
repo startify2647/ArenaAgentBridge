@@ -1,5 +1,7 @@
 # Connecting an agent framework
 
+[فارسی](HERMES_OPENCLAW.fa.md) · [README فارسی](../README.fa.md)
+
 The bridge is deliberately boring: it speaks `POST /v1/chat/completions` with a
 Bearer token and returns ordinary Chat-Completions JSON. Anything that can talk
 to OpenAI (or a LiteLLM/OpenRouter style gateway) can talk to it.

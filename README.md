@@ -343,8 +343,8 @@ arena-agent-bridge/
 │   └── curl_examples.sh
 ├── scripts/                     # run.sh, demo.sh, build-extensions.py,
 │                                # firefox-dev.sh, make_icons.py
-├── docs/                        # PROTOCOL.md, TROUBLESHOOTING.md,
-│                                # HERMES_OPENCLAW.md, FIREFOX.md
+├── docs/                        # PROTOCOL, TROUBLESHOOTING, HERMES_OPENCLAW,
+│                                # FIREFOX - each with a `.fa.md` Persian copy
 ├── Makefile                     # make help
 ├── README.fa.md                 # Persian documentation (same content)
 ├── pyproject.toml               # pytest + ruff config
@@ -359,7 +359,7 @@ make install          # .venv + server deps + jsdom
 make help             # list every task
 
 make run              # start the bridge server
-make test             # pytest (81) + jsdom (49 checks), no browser needed
+make test             # pytest (104) + jsdom (49 checks), no browser needed
 make lint             # ruff + node --check + manifest JSON
 make build            # dist/chrome + dist/firefox
 make firefox-lint     # Mozilla's validator on dist/firefox
@@ -376,7 +376,7 @@ Three test layers, none of which needs Chrome, Firefox or the network:
    runtime injection, the Firefox DOM-only fallback, busy/captcha/selector/submit
    failures, cancellation and standby.
 3. **Packaging, docs and static checks** (`tests/test_build.py`, 11 tests;
-   `tests/test_extension_static.py`, 14 tests; `tests/test_docs.py`, 10 tests) - both manifests validate, the build produces
+   `tests/test_extension_static.py`, 14 tests; `tests/test_docs.py`, 33 tests) - both manifests validate, the build produces
    complete loadable packages, version sync, loopback-only URLs, no `eval`.
 
 CI (`.github/workflows/ci.yml`) runs all three, Mozilla's `web-ext lint`, and

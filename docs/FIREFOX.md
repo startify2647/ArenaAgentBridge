@@ -1,5 +1,7 @@
 # Firefox
 
+[فارسی](FIREFOX.fa.md) · [README فارسی](../README.fa.md)
+
 The bridge runs the same shared code in Chrome/Edge and Firefox; only the manifest
 differs (`extensions/firefox/manifest.json`). This page covers what is special
 about Firefox.
