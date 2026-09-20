@@ -25,6 +25,8 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.1.0`
+
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
 > bridge is *not* a bypass: it uses your own logged-in session and your own
@@ -344,6 +346,7 @@ arena-agent-bridge/
 ├── docs/                        # PROTOCOL.md, TROUBLESHOOTING.md,
 │                                # HERMES_OPENCLAW.md, FIREFOX.md
 ├── Makefile                     # make help
+├── README.fa.md                 # Persian documentation (same content)
 ├── pyproject.toml               # pytest + ruff config
 ├── package.json                 # jsdom (dev only)
 └── .github/workflows/ci.yml
@@ -356,7 +359,7 @@ make install          # .venv + server deps + jsdom
 make help             # list every task
 
 make run              # start the bridge server
-make test             # pytest (71) + jsdom (49 checks), no browser needed
+make test             # pytest (81) + jsdom (49 checks), no browser needed
 make lint             # ruff + node --check + manifest JSON
 make build            # dist/chrome + dist/firefox
 make firefox-lint     # Mozilla's validator on dist/firefox
@@ -372,8 +375,8 @@ Three test layers, none of which needs Chrome, Firefox or the network:
    Send, capturing a growing answer (markdown, code fences), the page-world hook,
    runtime injection, the Firefox DOM-only fallback, busy/captcha/selector/submit
    failures, cancellation and standby.
-3. **Packaging + static checks** (`tests/test_build.py`, 11 tests;
-   `tests/test_extension_static.py`, 14 tests) - both manifests validate, the build produces
+3. **Packaging, docs and static checks** (`tests/test_build.py`, 11 tests;
+   `tests/test_extension_static.py`, 14 tests; `tests/test_docs.py`, 10 tests) - both manifests validate, the build produces
    complete loadable packages, version sync, loopback-only URLs, no `eval`.
 
 CI (`.github/workflows/ci.yml`) runs all three, Mozilla's `web-ext lint`, and
