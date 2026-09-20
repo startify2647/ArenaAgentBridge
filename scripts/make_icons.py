@@ -4,7 +4,7 @@
     python scripts/make_icons.py
 
 Draws a rounded-square badge with a cyan "A" over a small bridge deck and writes
-extension/icons/icon{16,32,48,128}.png.  Anti-aliasing is done by rendering at
+extensions/shared/icons/icon{16,32,48,128}.png.  Anti-aliasing is done by rendering at
 4x and box-downsampling.
 """
 
@@ -15,7 +15,7 @@ import struct
 import zlib
 from pathlib import Path
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "extension" / "icons"
+OUT_DIR = Path(__file__).resolve().parent.parent / "extensions" / "shared" / "icons"
 SCALE = 4
 
 BG_TOP = (13, 17, 23)

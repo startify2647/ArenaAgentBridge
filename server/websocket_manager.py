@@ -411,7 +411,7 @@ class BrowserBridge:
             "selector_missing": (
                 "dom_changed",
                 "the extension could not find the input box / send button; update the "
-                "selectors in extension/config.js (popup -> Diagnose DOM)",
+                "selectors in extensions/shared/config.js (popup -> Diagnose DOM)",
                 502,
             ),
             "response_timeout": (

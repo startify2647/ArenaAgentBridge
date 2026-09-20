@@ -26,7 +26,7 @@ jobs:
           pip install -r server/requirements-dev.txt
       - name: Lint
         run: ruff check .
-      - name: Tests
+      - name: Tests (server + build + static extension checks)
         run: pytest -q -m "not dom"
 
   extension:
@@ -37,14 +37,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Check JavaScript syntax
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build both extensions
         run: |
-          for file in extension/*.js; do node --check "$file"; done
-          python -m json.tool extension/manifest.json > /dev/null
+          python scripts/build-extensions.py --check
+          python scripts/build-extensions.py
+      - name: Check JavaScript syntax
+        run: for file in extensions/shared/*.js; do node --check "$file"; done
       - name: Install jsdom
         run: npm install --no-audit --no-fund
-      - name: DOM tests
-        run: node test/extension_dom_test.mjs
+      - name: DOM tests (content.js against a simulated page)
+        run: node tests/extension_dom_test.mjs
+      - name: Validate the Firefox package (Mozilla web-ext)
+        run: npx --yes web-ext@8 lint --source-dir dist/firefox
+      - name: Upload built extensions
+        uses: actions/upload-artifact@v4
+        with:
+          name: extensions
+          path: dist/
+          retention-days: 14
 
   demo:
     name: Chrome-free smoke test

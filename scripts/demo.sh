@@ -43,10 +43,14 @@ curl -s "$BASE/v1/chat/completions" \
 
 echo
 echo "==> POST /v1/chat/completions (stream: true, first 12 SSE lines)"
+# `head` closes the pipe early, which makes curl exit with a write error - that
+# is expected here, so pipefail must not kill the script.
+set +o pipefail
 curl -N -s "$BASE/v1/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"arena-agent","stream":true,"messages":[{"role":"user","content":"stream please"}]}' \
-  | head -n 12
+  | head -n 12 || true
+set -o pipefail
 
 echo
 echo "==> bridge status"

@@ -1,4 +1,4 @@
-"""Runs the jsdom-based DOM tests for the extension (test/extension_dom_test.mjs).
+"""Runs the jsdom-based DOM tests for the extension (tests/extension_dom_test.mjs).
 
 Skipped when Node.js or jsdom is unavailable, so the Python suite still works on
 a bare checkout:
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "test" / "extension_dom_test.mjs"
+SCRIPT = ROOT / "tests" / "extension_dom_test.mjs"
 
 
 @pytest.mark.dom

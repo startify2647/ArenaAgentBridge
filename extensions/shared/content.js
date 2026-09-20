@@ -1,5 +1,5 @@
 /**
- * ArenaAgentBridge - extension/content.js
+ * ArenaAgentBridge - extensions/shared/content.js
  * ---------------------------------------------------------------------------
  * Runs on https://arena.ai/* (document_start) and owns the WebSocket to the
  * local bridge (ws://127.0.0.1:8000/ws/browser).
@@ -301,6 +301,9 @@
     lastRelevantAt: 0,
     installed: false,
     urlPattern: null,
+    hookReady: false,
+    hookReadyAt: 0,
+    hookSource: null,
 
     install() {
       if (this.installed) return;
@@ -322,7 +325,11 @@
           this.lastActivityAt = Date.now();
           Signal.notify();
         } else if (data.kind === 'ready') {
-          log('page-world stream hook installed', data.url);
+          this.hookReady = true;
+          this.hookReadyAt = Date.now();
+          this.hookSource = data.captured ? data.captured.join('+') : 'unknown';
+          log('page-world stream hook ready', data.url);
+          Signal.notify();
         }
       });
     },
@@ -737,6 +744,12 @@
           loggedOut: this.isLoggedOut(),
         },
         stream: StreamCapture.summary(null),
+        pageHook: {
+          enabled: Boolean(CFG.capture && CFG.capture.ENABLED),
+          ready: StreamCapture.hookReady,
+          source: StreamCapture.hookSource,
+          mode: (CFG.capture && CFG.capture.INJECTION) || 'manifest',
+        },
         promptSample: truncate(promptText || '', 120),
       };
     },
@@ -975,6 +988,12 @@
         lastAnswerMs: this.lastAnswerMs,
         url: location.href,
         serverVersion: Transport.serverVersion,
+        pageHook: {
+          enabled: Boolean(CFG.capture && CFG.capture.ENABLED),
+          ready: StreamCapture.hookReady,
+          source: StreamCapture.hookSource,
+          mode: (CFG.capture && CFG.capture.INJECTION) || 'manifest',
+        },
       });
     },
 
@@ -1102,7 +1121,7 @@
       if (!input) {
         throw new BridgeFailure(
           'selector_missing',
-          'chat input not found - the markup probably changed; update extension/config.js (popup -> Diagnose DOM)'
+          'chat input not found - the markup probably changed; update extensions/shared/config.js (popup -> Diagnose DOM)'
         );
       }
       if (SiteDriver.isLoggedOut()) {
@@ -1333,26 +1352,84 @@
   // -------------------------------------------------------------------------
   // boot
   // -------------------------------------------------------------------------
-  function injectPageHook() {
-    if (!CFG.capture || !CFG.capture.ENABLED) return;
-    try {
-      const script = document.createElement('script');
-      script.src = chrome.runtime.getURL('inject.js');
-      script.async = false;
-      script.onload = () => script.remove();
-      (document.head || document.documentElement).appendChild(script);
-    } catch (error) {
-      warn('could not inject the page-world stream hook (DOM-only mode)', error);
-    }
-  }
+  /**
+   * Page-world stream hook (`inject.js`).
+   *
+   * The browser normally injects it for us (manifest `content_scripts` entry
+   * with `world: "MAIN"`, Chrome 111+ / Firefox 128+), which is the only way to
+   * run *before* the page patches or uses WebSocket itself.
+   *
+   * If that did not happen - older browser, page CSP, an already-open tab - the
+   * hook is optional and we degrade to DOM-only capture, so the fallbacks below
+   * are best effort and never fatal:
+   *   1. `chrome.scripting.executeScript({world: 'MAIN'})` (runtime file)
+   *   2. a `<script src=chrome-extension://.../inject.js>` tag (needs the page
+   *      CSP to allow the extension origin)
+   */
+  const PageHook = {
+    async ensure() {
+      if (!CFG.capture || !CFG.capture.ENABLED) return false;
+      if (StreamCapture.hookReady) return true;
+
+      const timeout = (CFG.capture && CFG.capture.HOOK_TIMEOUT_MS) || 2500;
+      const ready = await waitFor(() => StreamCapture.hookReady, { timeout, interval: 100 });
+      if (ready) return true;
+
+      if (((CFG.capture && CFG.capture.INJECTION) || 'manifest') === 'runtime') {
+        await this.injectRuntime();
+      }
+      await this.injectScriptTag();
+
+      const late = await waitFor(() => StreamCapture.hookReady, { timeout: 1500, interval: 100 });
+      if (late) return true;
+      if (CFG.debug && CFG.debug.VERBOSE) {
+        warn(
+          'page-world stream hook unavailable (page CSP or browser version) - ' +
+            'falling back to DOM-only completion detection'
+        );
+      }
+      return false;
+    },
+
+    async injectRuntime() {
+      // The background worker owns chrome.scripting; a content script cannot
+      // build a valid `target.tabId` on its own.
+      const reply = await sendToBackground({ kind: 'inject-page-hook' });
+      if (reply && reply.ok) {
+        log('injected the page hook via scripting.executeScript (MAIN world)');
+        return true;
+      }
+      if (reply && reply.error) log('runtime page-hook injection unavailable:', reply.error);
+      return false;
+    },
+
+    injectScriptTag() {
+      try {
+        const script = document.createElement('script');
+        script.src = chrome.runtime.getURL('inject.js');
+        script.async = false;
+        script.onload = () => script.remove();
+        script.onerror = () => script.remove();
+        (document.head || document.documentElement).appendChild(script);
+        return true;
+      } catch (error) {
+        warn('could not inject the page-world stream hook (DOM-only mode)', error);
+        return false;
+      }
+    },
+  };
 
   async function boot() {
-    injectPageHook();
     if (document.body) Badge.mount();
     else document.addEventListener('DOMContentLoaded', () => Badge.mount(), { once: true });
     await Transport.loadOverride();
     Bridge.start();
     log('content script ready on', location.href, '- server:', Transport.url());
+    // Do not block the bridge on the optional stream hook.
+    PageHook.ensure().then((ok) => {
+      Bridge.reportState();
+      if (ok) log('page hook active (%s)', StreamCapture.hookSource);
+    });
   }
 
   window.__AAB__ = {
@@ -1361,6 +1438,7 @@
     transport: Transport,
     driver: SiteDriver,
     capture: StreamCapture,
+    pageHook: PageHook,
     signal: Signal,
     pipeline: Pipeline,
     diagnose: () => SiteDriver.diagnose(''),

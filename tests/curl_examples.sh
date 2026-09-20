@@ -4,7 +4,7 @@
 #
 #   1. start the server:            python -m server
 #   2. open https://arena.ai/agent with the extension installed and log in
-#   3. run a block below           ./test/curl_examples.sh
+#   3. run a block below           ./tests/curl_examples.sh
 #
 # Every command is copy-pasteable on its own; the script just runs them in
 # sequence and prints a short explanation first.

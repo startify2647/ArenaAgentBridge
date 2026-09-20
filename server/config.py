@@ -171,7 +171,7 @@ class Settings:
     log_level: str = "INFO"
     log_json: bool = False
     stats_window: int = 50
-    version: str = "1.0.0"
+    version: str = "1.1.0"
 
     model_ids: List[str] = field(default_factory=list)
 

@@ -1,5 +1,5 @@
 /**
- * ArenaAgentBridge - extension/inject.js
+ * ArenaAgentBridge - extensions/shared/inject.js
  * ---------------------------------------------------------------------------
  * Runs in the PAGE world (MAIN world) because content scripts cannot touch the
  * page's `window.WebSocket`.

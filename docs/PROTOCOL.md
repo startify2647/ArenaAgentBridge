@@ -163,7 +163,7 @@ JSON text frames, one message per frame.
 
 ## 3. Emulated stream (optional capture path)
 
-The extension taps the page's own WebSocket/SSE traffic (`extension/inject.js`)
+The extension taps the page's own WebSocket/SSE traffic (`extensions/shared/inject.js`)
 purely to learn *when* generation starts and ends. Frames look like:
 
 | prefix | meaning            |
@@ -172,6 +172,6 @@ purely to learn *when* generation starts and ends. Frames look like:
 | `ag:`  | reasoning/thinking |
 | `ad:`  | extra data/meta    |
 
-Those prefixes are configurable in `extension/config.js` (`capture.*`). Only
+Those prefixes are configurable in `extensions/shared/config.js` (`capture.*`). Only
 lengths and timestamps are used for completion detection - the answer itself is
 still read from the DOM, so a prefix change degrades speed, never correctness.

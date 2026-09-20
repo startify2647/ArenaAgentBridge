@@ -1,12 +1,12 @@
 # ArenaAgentBridge
 
 **A local, OpenAI-compatible bridge from agent frameworks (Hermes, OpenClaw,
-LiteLLM, Open WebUI, plain `curl`) to the [Arena.ai](https://arena.ai)/Agent web
-UI - through a real, already-logged-in Chrome session.**
+LiteLLM, Open WebUI, plain `curl`) to the [Arena.ai](https://arena.ai) web UI -
+through a real, already-logged-in browser session.**
 
 No official API. No reCAPTCHA token. No stored cookies. No captcha bypass. Just a
-real browser doing what it already does, with a FastAPI server and a Manifest V3
-extension gluing it to the OpenAI wire format.
+real browser doing what it already does, with a FastAPI server and one shared
+extension codebase packaged for **Chrome/Edge and Firefox**.
 
 ```
 Hermes / OpenClaw
@@ -15,7 +15,7 @@ Hermes / OpenClaw
 FastAPI server ── queue ──▶ WebSocket /ws/browser
       │                            │
       │                            ▼
-      │                     Chrome extension (content script)
+      │                  browser extension (content script)
       │                            │  DOM automation (type, click, read)
       │                            ▼
       └──────────────◀──     https://arena.ai/agent
@@ -37,7 +37,8 @@ touches cookies, and never stores credentials.
 
 - [How it works](#how-it-works)
 - [Quick start (5 minutes)](#quick-start-5-minutes)
-- [No-Chrome demo](#no-chrome-demo-30-seconds)
+- [Firefox](#firefox)
+- [No-browser demo (30 seconds)](#no-browser-demo-30-seconds)
 - [Configuration](#configuration)
 - [Extension reference](#extension-reference)
 - [API](#api)
@@ -68,7 +69,7 @@ to a documented HTTP status and an OpenAI-shaped error body.
 
 ## Quick start (5 minutes)
 
-**Requirements:** Python 3.10+, Chrome/Edge 116+ (Manifest V3), Linux/macOS/Windows.
+**Requirements:** Python 3.10+, Chrome/Edge 111+ or Firefox 128+, Linux/macOS/Windows.
 
 ### 1. Start the server
 
@@ -91,15 +92,24 @@ cp .env.example .env             # optional: tune timeouts, sanitiser, port
 Check it: <http://127.0.0.1:8000/> (status dashboard) or
 `curl -s http://127.0.0.1:8000/v1/bridge/status | python -m json.tool`.
 
-### 2. Load the extension
+### 2. Build and load the extension
 
-1. Open `chrome://extensions`.
-2. Enable **Developer mode** (top right).
-3. **Load unpacked** → select the `extension/` folder of this repository.
-4. Open <https://arena.ai/agent> and make sure you are **logged in**.
-5. Look at the bottom-right corner of the page: the badge should read
-   `bridge: connected`. Click the extension icon for a status popup with a
-   **Diagnose DOM** button.
+```bash
+python scripts/build-extensions.py     # → dist/chrome and dist/firefox
+```
+
+| browser | load it |
+| --- | --- |
+| **Chrome / Edge / Brave** | `chrome://extensions` → enable *Developer mode* → **Load unpacked** → `dist/chrome` |
+| **Firefox 128+** | `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → `dist/firefox/manifest.json`, then press **Grant permissions** in the popup |
+
+Then open <https://arena.ai/agent> and make sure you are **logged in**. The badge
+in the bottom-right corner of the page should read `bridge: connected`; the
+extension popup shows the server, the bridge tab and a **Diagnose DOM** button.
+
+> The extension sources live in `extensions/shared/` and are copied into
+> `dist/<browser>/` by the build, so both browsers run the *same* JavaScript. Load
+> `dist/...`, not the sources. See [`extensions/README.md`](extensions/README.md).
 
 ### 3. Talk to it
 
@@ -113,7 +123,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
       }' | python -m json.tool
 ```
 
-More examples (streaming, multi-turn, errors): [`test/curl_examples.sh`](test/curl_examples.sh).
+More examples (streaming, multi-turn, errors): [`tests/curl_examples.sh`](tests/curl_examples.sh).
 
 ### 4. Point Hermes / OpenClaw at it
 
@@ -127,12 +137,31 @@ More examples (streaming, multi-turn, errors): [`test/curl_examples.sh`](test/cu
 
 Details and per-client recipes: [`docs/HERMES_OPENCLAW.md`](docs/HERMES_OPENCLAW.md).
 
-## No-Chrome demo (30 seconds)
+## Firefox
+
+The same extension, packaged for Gecko. Firefox-specific facts:
+
+* **Host permissions are opt-in** (MV3): the popup shows a yellow *permissions*
+  card → **Grant permissions** (asks for `127.0.0.1:8000`, `localhost:8000` and
+  `arena.ai`). Without it you get `browser_offline` in the popup.
+* **Temporary add-ons** disappear when Firefox closes; permanent installs require
+  signing (AMO or Developer Edition/Nightly with signature checks off). The
+  options are laid out in [`docs/FIREFOX.md`](docs/FIREFOX.md).
+* The background is an **event page**, not a service worker, so there is no
+  service-worker console - use `about:debugging` → *Inspect*.
+* The optional page-world stream hook may be blocked by the site's CSP; the
+  extension then falls back to DOM-only completion detection (slower, still
+  correct). The popup's *Diagnose DOM* shows `page hook: active/inactive`.
+
+Development loop: `./scripts/firefox-dev.sh` (launches Firefox with the add-on),
+`./scripts/firefox-dev.sh --lint` (Mozilla's validator, also in CI).
+
+## No-browser demo (30 seconds)
 
 Proves the whole pipeline without a browser (canned answers, obviously):
 
 ```bash
-./scripts/demo.sh
+./scripts/demo.sh        # or: make demo
 ```
 
 It starts the server with `AAB_MOCK_BROWSER=1`, calls `/v1/models`, a completion,
@@ -143,7 +172,7 @@ an integration before touching selectors:
 
 ```bash
 python -m server                                   # terminal 1
-python test/dev_ws_client.py --reply "hello"       # terminal 2: fake browser
+python tests/dev_ws_client.py --reply "hello"      # terminal 2: fake browser
 curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"arena-agent","messages":[{"role":"user","content":"ping"}]}'   # terminal 3
@@ -164,12 +193,13 @@ over the file. The important knobs:
 | `AAB_PATTERNS_FILE`     | –       | JSON file with extra sanitiser rules                    |
 | `AAB_REQUIRE_API_KEY`   | `0`     | `1` + `AAB_API_KEY=…` to require a real Bearer token     |
 | `AAB_STREAM_CHUNK_CHARS` / `AAB_STREAM_CHUNK_DELAY_MS` | `32` / `12` | SSE replay pace |
-| `AAB_MOCK_BROWSER`      | `0`     | `1` = answer without Chrome (testing only)              |
+| `AAB_MOCK_BROWSER`      | `0`     | `1` = answer without a browser (testing only)           |
 | `AAB_LOG_LEVEL` / `AAB_LOG_JSON` | `INFO` / `0` | logging verbosity / format        |
 
 Extension: everything site-specific lives in
-[`extension/config.js`](extension/config.js) - selectors, stability thresholds,
-SSE prefixes, debug flags. You can override values live from the page console:
+[`extensions/shared/config.js`](extensions/shared/config.js) - selectors, stability
+thresholds, SSE prefixes, debug flags. You can override values live from the page
+console:
 
 ```js
 __AAB_CONFIG__.selectors.input.unshift('textarea.my-new-class');
@@ -178,14 +208,17 @@ __AAB__.diagnose();
 
 ## Extension reference
 
+Sources live in `extensions/shared/`; `extensions/chrome/manifest.json` and
+`extensions/firefox/manifest.json` are the only browser-specific files.
+
 | file            | role |
 | --------------- | ---- |
-| `config.js`     | all selectors, thresholds and flags (the first file to edit) |
-| `content.js`    | owns the WebSocket; types the prompt, clicks Send, reads the answer |
-| `inject.js`     | page-world hook that *observes* the site's WebSocket/SSE traffic for start/stop detection |
-| `background.js` | MV3 worker: hands the single bridge lease to one tab, keeps itself alive, re-injects missing content scripts |
-| `popup.html/js` | status, **Diagnose DOM**, reconnect, cancel |
-| `icons/`        | generated by `python scripts/make_icons.py` |
+| `shared/config.js`     | all selectors, thresholds and flags (the first file to edit) |
+| `shared/content.js`    | owns the WebSocket; types the prompt, clicks Send, reads the answer |
+| `shared/inject.js`     | page-world hook that *observes* the site's WebSocket/SSE traffic for start/stop detection |
+| `shared/background.js` | connection lease to one tab, keepalive, script re-injection, optional page-hook injection |
+| `shared/popup.html/js` | status, **Diagnose DOM**, permissions (Firefox), reconnect, cancel |
+| `shared/icons/`        | generated by `python scripts/make_icons.py` |
 
 Key behaviour knobs in `config.js`:
 
@@ -198,6 +231,7 @@ Key behaviour knobs in `config.js`:
 | `NO_OUTPUT_MS`      | `60000` | nothing at all ⇒ `no_output` error |
 | `MAX_WAIT_MS`       | `300000`| hard per-request cap |
 | `RESET_BEFORE_REQUEST` | `false` | click "New chat" before every request (clean context, slower) |
+| `capture.INJECTION` | `manifest` | how the page-world hook is injected (`manifest` / `runtime`) |
 | `SHOW_BADGE`        | `true`  | on-page status badge |
 
 `inject.js` only reads; it never sends anything, never touches `document.cookie`
@@ -227,24 +261,25 @@ curl -s http://127.0.0.1:8000/readyz          # is a browser attached?
 curl -s http://127.0.0.1:8000/v1/bridge/status | python -m json.tool
 ```
 
-* **`browser_offline`** - the extension is not connected: open
-  `https://arena.ai/agent`, reload the tab if it predates the extension install,
-  and check the badge.
+* **`browser_offline`** - the extension is not connected: did you load `dist/<browser>`
+  (not the sources)? Is the page logged in? (Firefox: grant the host permissions.)
 * **`dom_changed`** - the site markup moved. Popup → **Diagnose DOM**, then add a
-  selector to `extension/config.js`.
+  selector to `extensions/shared/config.js` and rebuild.
 * **`captcha_required`** - solve it by hand in the tab; the bridge will not.
 * **Answers truncated / previous turn included** - tune `STABLE_MS`,
   `SSE_IDLE_MS` and the assistant selectors.
 
 Everything else (long `no_output`, slow responses, port conflicts, reading logs,
-sanitiser false positives): [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+sanitiser false positives, Firefox permission quirks):
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) and
+[`docs/FIREFOX.md`](docs/FIREFOX.md).
 
 ## Security model
 
-* **Loopback only.** Default bind is `127.0.0.1`; CORS allows only
-  `chrome-extension://…`, `localhost` and the site itself. Do not expose it - by
-  default the API accepts any Bearer token, because the security boundary is
-  "only this machine can connect".
+* **Loopback only.** Default bind is `127.0.0.1`; CORS allows only extension
+  origins, `localhost` and the site itself. Do not expose it - by default the API
+  accepts any Bearer token, because the security boundary is "only this machine
+  can connect".
 * **No credentials.** No cookies, tokens or profiles are read, stored or
   forwarded. The extension uses your existing browser session, nothing else. The
   server holds prompts in memory only.
@@ -257,10 +292,11 @@ sanitiser false positives): [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 * **No captcha bypass, no stealth.** The extension does not spoof fingerprints,
   hide automation flags or solve challenges. If the site asks for a human, the
   request fails with `captcha_required`.
+* **Minimal extension permissions.** `storage`, `alarms`, `scripting` and exactly
+  three host origins (arena.ai + loopback). No `cookies`, no `webRequest`, no
+  `<all_urls>`, no `eval`, no analytics.
 * **Optional auth.** `AAB_REQUIRE_API_KEY=1` + `AAB_API_KEY=…` enforces a Bearer
   token (useful on shared machines).
-* **Talk to it only from loopback.** If you forward port 8000 to your LAN, enable
-  `AAB_REQUIRE_API_KEY` first.
 
 ## Limitations
 
@@ -271,79 +307,77 @@ sanitiser false positives): [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
 * **Streaming is emulated** - the answer is fetched whole, then replayed in
   chunks (`x_bridge.streamed: true`).
 * **DOM fragility.** A site redesign breaks selectors until you update
-  `config.js`; the failure is explicit (`dom_changed`) rather than silent.
-* **Background tabs** are throttled by Chrome. Keep the arena.ai tab in its own
-  window, disable "Memory Saver" for the site, and do not expect a minimised
-  window to be as fast as the foreground.
+  `extensions/shared/config.js`; the failure is explicit (`dom_changed`).
+* **Background tabs** are throttled (both browsers). Keep the agent tab in its own
+  window, disable memory saver for the site.
 * **Context lives in the page.** Long sessions may degrade or hit the site's own
   limits; `RESET_BEFORE_REQUEST = true` starts fresh per request.
 * **Image/audio input is dropped** (`[image omitted by bridge]`).
-* **Attachments, files, and site tools can't be driven** by the bridge.
+* **Attachments, files and site tools can't be driven** by the bridge.
 
 ## Project layout
 
 ```
 arena-agent-bridge/
-├── server/
-│   ├── main.py               # FastAPI app, OpenAI endpoints, SSE, dashboard
-│   ├── config.py             # env/.env settings
-│   ├── models.py             # OpenAI + browser protocol models
-│   ├── prompt_builder.py     # messages[] -> single labelled transcript
-│   ├── sanitizer.py          # destructive-command inspection/neutralisation
-│   ├── websocket_manager.py  # single browser client, serial queue, stats
-│   └── mock_browser.py       # Chrome-free fake browser for tests/demos
-├── extension/
-│   ├── manifest.json         # MV3, loopback + arena.ai only
-│   ├── config.js             # ← selectors & thresholds live here
-│   ├── content.js            # WebSocket + DOM automation
-│   ├── inject.js             # page-world stream observer
-│   ├── background.js         # tab lease, keepalive, re-injection
-│   ├── popup.html / popup.js # status + Diagnose DOM
-│   └── icons/
-├── test/
-│   ├── test_bridge.py        # server end-to-end (fake browser, no Chrome)
-│   ├── test_extension_dom.py # pytest wrapper for the jsdom suite
-│   ├── extension_dom_test.mjs# content.js automation tests (jsdom)
-│   ├── test_extension_static.py
-│   ├── dev_ws_client.py      # fake browser CLI for debugging
+├── server/                      # FastAPI bridge (loopback only)
+│   ├── main.py                  # endpoints, SSE, dashboard
+│   ├── config.py                # env/.env settings
+│   ├── models.py                # OpenAI + browser protocol models
+│   ├── prompt_builder.py        # messages[] -> one labelled transcript
+│   ├── sanitizer.py             # destructive-command inspection/neutralisation
+│   ├── websocket_manager.py     # single browser client, serial queue, stats
+│   └── mock_browser.py          # browser-free fake client for tests/demos
+├── extensions/                  # one shared codebase, two packages
+│   ├── shared/                  # config.js, content.js, background.js, inject.js, popup.*, icons/
+│   ├── chrome/manifest.json     # MV3 service worker, world:MAIN hook
+│   └── firefox/manifest.json    # event page, gecko id, opt-in host permissions
+├── tests/                       # no browser required
+│   ├── test_bridge.py           # server end-to-end with a scripted fake browser
+│   ├── test_build.py            # both extension packages build & validate
+│   ├── test_extension_static.py # manifest/config/API-surface checks
+│   ├── test_extension_dom.py    # pytest wrapper for the jsdom suite
+│   ├── extension_dom_test.mjs   # content.js automation suite (jsdom)
+│   ├── dev_ws_client.py         # fake browser CLI
 │   └── curl_examples.sh
-├── docs/                     # PROTOCOL.md, TROUBLESHOOTING.md, HERMES_OPENCLAW.md
-├── scripts/                  # run.sh, demo.sh, make_icons.py
-├── docs/
-├── .github/workflows/ci.yml
-├── LICENSE
-└── .env.example
+├── scripts/                     # run.sh, demo.sh, build-extensions.py,
+│                                # firefox-dev.sh, make_icons.py
+├── docs/                        # PROTOCOL.md, TROUBLESHOOTING.md,
+│                                # HERMES_OPENCLAW.md, FIREFOX.md
+├── Makefile                     # make help
+├── pyproject.toml               # pytest + ruff config
+├── package.json                 # jsdom (dev only)
+└── .github/workflows/ci.yml
 ```
 
 ## Development
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r server/requirements-dev.txt
+make install          # .venv + server deps + jsdom
+make help             # list every task
 
-pytest -q                 # 52 tests (server, static extension, jsdom)
-pytest -q -m "not dom"    # skip the jsdom suite
-
-npm install               # jsdom, for the extension DOM tests
-node test/extension_dom_test.mjs
-
-ruff check .              # lint
-python scripts/make_icons.py   # regenerate extension/icons
+make run              # start the bridge server
+make test             # pytest (71) + jsdom (49 checks), no browser needed
+make lint             # ruff + node --check + manifest JSON
+make build            # dist/chrome + dist/firefox
+make firefox-lint     # Mozilla's validator on dist/firefox
 ```
 
-Three layers, none of which needs Chrome or the network:
+Three test layers, none of which needs Chrome, Firefox or the network:
 
-1. **Server end-to-end** (`test/test_bridge.py`, 44 tests) - drives the real
-   HTTP + WebSocket code paths with a scripted fake browser: queueing, prompt
-   assembly, SSE streaming, error mapping, sanitiser, timeouts.
-2. **Extension automation** (`test/extension_dom_test.mjs`, 35 checks) - runs the
+1. **Server end-to-end** (`tests/test_bridge.py`, 44 tests; `tests/test_demo.py` runs `demo.sh`) - real HTTP + WebSocket
+   code paths with a scripted fake browser: queueing, prompt assembly, SSE
+   streaming, error mapping, sanitiser, timeouts, disconnects.
+2. **Extension automation** (`tests/extension_dom_test.mjs`, 49 checks) - runs the
    real `content.js` inside jsdom against a simulated chat page: typing, clicking
-   Send, capturing a growing answer (markdown, code fences), busy/captcha/
-   selector/submit failure paths, cancellation and standby.
-3. **Static extension checks** (`test_extension_static.py`, 7 tests) - manifest ↔ files,
-   config integrity, loopback-only URLs, no `eval`, no remote hosts.
+   Send, capturing a growing answer (markdown, code fences), the page-world hook,
+   runtime injection, the Firefox DOM-only fallback, busy/captcha/selector/submit
+   failures, cancellation and standby.
+3. **Packaging + static checks** (`tests/test_build.py`, 11 tests;
+   `tests/test_extension_static.py`, 14 tests) - both manifests validate, the build produces
+   complete loadable packages, version sync, loopback-only URLs, no `eval`.
 
-CI (`.github/workflows/ci.yml`) runs all three plus `./scripts/demo.sh`.
+CI (`.github/workflows/ci.yml`) runs all three, Mozilla's `web-ext lint`, and
+`./scripts/demo.sh`.
 
 ## Legal & safety
 
@@ -359,4 +393,4 @@ CI (`.github/workflows/ci.yml`) runs all three plus `./scripts/demo.sh`.
   agent framework can execute shell commands, and never let an agent run code
   from a web page unattended.
 
-MIT licensed - see the project repository.
+MIT licensed - see [LICENSE](LICENSE).

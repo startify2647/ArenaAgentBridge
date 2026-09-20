@@ -1,21 +1,43 @@
 {
   "manifest_version": 3,
   "name": "ArenaAgentBridge",
-  "version": "1.0.0",
-  "description": "Exposes the Arena.ai/Agent chat UI to a local OpenAI-compatible bridge (ArenaAgentBridge). Personal/experimental use only.",
-  "minimum_chrome_version": "116",
+  "version": "1.1.0",
+  "description": "Exposes the Arena.ai web UI to a local OpenAI-compatible bridge (ArenaAgentBridge). Personal/experimental use only.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "arena-agent-bridge@local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ],
+        "optional": []
+      }
+    }
+  },
   "permissions": [
     "storage",
     "alarms",
     "scripting"
+  ],
+  "optional_permissions": [
+    "tabs"
   ],
   "host_permissions": [
     "https://arena.ai/*",
     "http://127.0.0.1:8000/*",
     "http://localhost:8000/*"
   ],
+  "optional_host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*",
+    "https://arena.ai/*"
+  ],
   "background": {
-    "service_worker": "background.js"
+    "scripts": [
+      "config.js",
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
@@ -28,6 +50,17 @@
       ],
       "run_at": "document_start",
       "all_frames": false
+    },
+    {
+      "matches": [
+        "https://arena.ai/*"
+      ],
+      "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN"
     }
   ],
   "web_accessible_resources": [

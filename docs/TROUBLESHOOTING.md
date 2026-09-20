@@ -9,17 +9,34 @@ curl -s http://127.0.0.1:8000/v1/bridge/status | python -m json.tool
 * `browser.connected: false` → the extension is not connected (next section).
 * `server.queue_depth > 0` → requests are piling up; the page is slow or stuck.
 
-In Chrome, click the extension icon and press **Diagnose DOM**: it reports which
-selectors matched (0 hits = fix `extension/config.js`), whether a captcha or a
-login wall is present, how many messages were found and whether the page-world
-stream hook was injected. You can also see the state on the page itself - there
+Click the extension icon and press **Diagnose DOM**: it reports which selectors
+matched (0 hits = fix `extensions/shared/config.js`), whether a captcha or a login
+wall is present, how many messages were found and whether the optional page-world
+stream hook is active. You can also see the state on the page itself - there
 is a small badge in the bottom-right corner.
 
 ---
 
+## Firefox: nothing connects at all
+
+Firefox MV3 makes host permissions **opt-in**, so after installing the extension
+it may not be allowed to reach `127.0.0.1:8000` yet:
+
+1. Click the extension icon: a yellow **permissions** card appears → press
+   **Grant permissions** and accept the prompt.
+2. Alternatively: `about:addons` → ArenaAgentBridge → **Permissions** tab → grant
+   the two origins.
+3. Reload the arena.ai tab afterwards (the popup's *Reconnect* button also works).
+
+Other Firefox notes: the background is an event page (not a service worker), so
+`chrome://extensions`-style service-worker consoles do not exist - use
+`about:debugging#/runtime/this-firefox` → **Inspect** next to the extension to see
+the background log, and the tab's own console for the content-script log.
+
 ## "browser_offline" / the badge says `disconnected`
 
 1. Is the server running? `curl http://127.0.0.1:8000/healthz`.
+   (Firefox users: check the permissions card first, see below.)
 2. Is `https://arena.ai/agent` open in Chrome? (Any `arena.ai` page works, but
    the capture logic expects the agent UI.)
 3. Was the page opened **before** the extension was installed/loaded? Then the
@@ -39,11 +56,11 @@ The site markup changed. Open the popup → **Diagnose DOM** and look at
 
 1. In the page: right-click the chat box → *Inspect* → copy a stable class or
    test id (prefer `data-*`/`aria-*` over hashed CSS-module classes).
-2. Add it to the **front** of the relevant list in `extension/config.js`
+2. Add it to the **front** of the relevant list in `extensions/shared/config.js`
    (`selectors.input`, `selectors.sendButton`, `selectors.stopButton`,
    `selectors.assistantMessage`).
 3. Reload the extension (`chrome://extensions` → ↻) and reload the tab.
-4. Test without Hermes: `python test/dev_ws_client.py --manual`, then
+4. Test without Hermes: `python tests/dev_ws_client.py --manual`, then
    `curl` one request. Fix repeatable failures before wiring up the agent.
 
 Live experimentation without editing files: in the page console,
@@ -69,7 +86,7 @@ as if you were using the site by hand.
 
 ## Answers come back truncated or with the previous turn attached
 
-Tuning knobs in `extension/config.js` → `behavior`:
+Tuning knobs in `extensions/shared/config.js` → `behavior`:
 
 | symptom                                    | knob                                              |
 | ------------------------------------------ | ------------------------------------------------- |
@@ -107,7 +124,7 @@ single request. For finer control, write your own rules and point
 ## Port already in use
 
 `AAB_PORT=8100 ./scripts/run.sh`, and change `SERVER_WS_URL` in
-`extension/config.js` (or just save the new URL in the popup on the current tab).
+`extensions/shared/config.js` (or just save the new URL in the popup on the current tab).
 
 ## Reading the logs
 

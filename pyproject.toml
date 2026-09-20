@@ -1,13 +1,13 @@
 [project]
 name = "arena-agent-bridge"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local OpenAI-compatible bridge from Hermes/OpenClaw to the Arena.ai/Agent web UI"
 requires-python = ">=3.10"
 readme = "README.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["test"]
+testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = ["dom: requires Node.js + jsdom (deselect with -m 'not dom')"]
@@ -15,7 +15,7 @@ markers = ["dom: requires Node.js + jsdom (deselect with -m 'not dom')"]
 [tool.ruff]
 line-length = 110
 target-version = "py310"
-exclude = [".venv", "extension/icons"]
+exclude = [".venv", "extensions/shared/icons", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]

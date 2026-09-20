@@ -1,5 +1,5 @@
 /**
- * ArenaAgentBridge - extension/config.js
+ * ArenaAgentBridge - extensions/shared/config.js
  * ---------------------------------------------------------------------------
  * THE ONLY FILE YOU NEED TO EDIT WHEN THE WEBSITE CHANGES.
  *
@@ -170,6 +170,17 @@
        *  addition to the DOM. Speeds up completion detection a lot; if the page
        *  changes the prefix format it degrades gracefully to DOM-only. */
       ENABLED: true,
+      /**
+       * How inject.js gets into the page world:
+       *   'manifest'  the browser injects it (Chrome 111+ / Firefox 128+), best
+       *               case: it runs before any page script
+       *   'runtime'   the content script calls scripting.executeScript(world:'MAIN')
+       *               and falls back to a <script src> tag
+       * The hook is optional: without it capture reports DOM-only, which is
+       * slower but still correct. Firefox may block page-world injection when the
+       * site ships a strict Content-Security-Policy.
+       */
+      INJECTION: 'manifest',
       /** stream payload prefixes: 'a0:' main text, 'ag:' reasoning, 'ad:' data. */
       PREFIX_MAIN: 'a0:',
       PREFIX_REASONING: 'ag:',
@@ -178,6 +189,8 @@
       MAX_FRAMES: 400,
       /** Ignore streams not matching these (regex, as string). */
       URL_FILTER: 'arena\\.ai|/api/|/chat|completion|stream',
+      /** Give the page hook this long to announce itself before trying again. */
+      HOOK_TIMEOUT_MS: 2500,
     },
 
     debug: {
@@ -208,7 +221,7 @@
     return base;
   }
 
-  CONFIG.version = '1.0.0';
+  CONFIG.version = '1.1.0';
   CONFIG.VERSION = CONFIG.version; // convenience alias used by the popup / background
 
   // Content scripts, the background worker and the popup all read

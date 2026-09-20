@@ -1,8 +1,8 @@
 /**
  * ArenaAgentBridge - test/extension_dom_test.mjs
  * ---------------------------------------------------------------------------
- * Runs extension/content.js inside jsdom against a *simulated* arena.ai chat
- * page and checks the automation pipeline end to end:
+ * Runs extensions/shared/content.js inside jsdom against a *simulated* arena.ai
+ * chat page and checks the automation pipeline end to end:
  *
  *   type into the box -> click Send -> read the growing answer -> report back
  *
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXT = path.join(ROOT, 'extension');
+const SHARED = path.join(ROOT, 'extensions', 'shared');
 
 let JSDOM;
 try {
@@ -33,8 +33,8 @@ try {
   process.exit(0);
 }
 
-const CONFIG_SRC = readFileSync(path.join(EXT, 'config.js'), 'utf8');
-const CONTENT_SRC = readFileSync(path.join(EXT, 'content.js'), 'utf8');
+const CONFIG_SRC = readFileSync(path.join(SHARED, 'config.js'), 'utf8');
+const CONTENT_SRC = readFileSync(path.join(SHARED, 'content.js'), 'utf8');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -133,26 +133,54 @@ class FakeSite {
 // ---------------------------------------------------------------------------
 // chrome extension API stub
 // ---------------------------------------------------------------------------
-function installChromeStub(window, { granted = true } = {}) {
+function installChromeStub(window, { granted = true, scripting = 'ok' } = {}) {
   const sent = [];
   const listeners = [];
+  let scriptingApi;
   const runtime = {
     lastError: undefined,
-    getManifest: () => ({ version: '1.0.0' }),
+    getManifest: () => ({ version: '1.1.0' }),
     getURL: (file) => `chrome-extension://aabtest/${file}`,
     connect: () => ({ postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }),
     sendMessage: (message, callback) => {
       sent.push(message);
-      if (callback) {
-        if (message.kind === 'claim') callback({ granted, ownerTabId: granted ? 7 : 3, leaseMs: 60000 });
-        else if (message.kind === 'popup-state') callback({ ok: true });
-        else callback({ ok: true });
+      // The real background worker owns chrome.scripting - emulate that here.
+      if (message.kind === 'inject-page-hook') {
+        const run = scriptingApi
+          .executeScript({ target: { tabId: 1 }, world: 'MAIN', files: ['inject.js'] })
+          .then(() => ({ ok: true }))
+          .catch((error) => ({ ok: false, error: String(error && error.message) }));
+        if (callback) run.then(callback);
+        return run;
       }
-      return Promise.resolve({ ok: true });
+      const reply =
+        message.kind === 'claim'
+          ? { granted, ownerTabId: granted ? 7 : 3, leaseMs: 60000 }
+          : { ok: true };
+      if (callback) callback(reply);
+      return Promise.resolve(reply);
     },
     onMessage: { addListener: (fn) => listeners.push(fn) },
   };
-  window.chrome = { runtime, storage: { local: { get: (keys, cb) => cb({}) } } };
+  const executeScriptCalls = [];
+  scriptingApi = {
+    executeScript: async (options) => {
+      executeScriptCalls.push(options);
+      if (scripting === 'fail') throw new Error('Missing host permission for the tab');
+      if (scripting === 'missing') return undefined;
+      // pretend the browser executed inject.js in the page world
+      window.eval(readFileSync(path.join(SHARED, 'inject.js'), 'utf8'));
+      return [{ result: null }];
+    },
+  };
+
+  window.chrome = {
+    runtime,
+    scripting: scripting === 'missing' ? undefined : scriptingApi,
+    storage: { local: { get: (keys, cb) => cb({}) } },
+    permissions: { contains: async () => true, request: async () => true },
+  };
+  window.__testScripting = { executeScriptCalls };
   window.__testBridge = { sent, listeners };
   return window.__testBridge;
 }
@@ -237,7 +265,7 @@ const FAST_CONFIG = {
   debug: { VERBOSE: false, LOG_LENGTHS: false },
 };
 
-async function createHarness({ site = {}, config = {}, granted = true } = {}) {
+async function createHarness({ site = {}, config = {}, granted = true, scripting = 'ok', loadHook = true } = {}) {
   const virtualConsole = new (require('jsdom').VirtualConsole)();
   virtualConsole.on('jsdomError', (error) => {
     // jsdom cannot implement form submission / navigation: expected noise
@@ -271,8 +299,12 @@ async function createHarness({ site = {}, config = {}, granted = true } = {}) {
   const fakeSite = new FakeSite(window, site);
   fakeSite.wire();
 
-  const chrome = installChromeStub(window, { granted });
   const ws = installWebSocketStub(window);
+
+  // The manifests declare inject.js as a page-world (MAIN) content script, so it
+  // runs before the content script and before any page script.
+  if (loadHook) window.eval(readFileSync(path.join(SHARED, 'inject.js'), 'utf8'));
+  const chrome = installChromeStub(window, { granted, scripting });
 
   window.__AAB_CONFIG__ = { ...FAST_CONFIG, ...config };
   window.eval(CONFIG_SRC);
@@ -297,6 +329,7 @@ async function createHarness({ site = {}, config = {}, granted = true } = {}) {
       /* already gone */
     }
   };
+  await sleep(60); // let the postMessage 'ready' travel
   return { dom, window, site: fakeSite, chrome, ws, socket, close };
 }
 
@@ -511,6 +544,71 @@ async function main() {
     check('no websocket was opened', h.ws.sockets.length === 0, `${h.ws.sockets.length} sockets`);
     check('no hello was sent', !h.ws.sent.some((m) => m.type === 'hello'));
     check('state reported as standby', h.chrome.sent.some((m) => m.kind === 'state' && m.state === 'standby'));
+    h.close();
+  });
+
+
+  await test('page-world hook: page sockets are tapped and reported as ready', async () => {
+    const h = await createHarness();
+    check('hook reported itself ready', h.window.__AAB__.capture.hookReady === true);
+    check('hook state is exposed for the popup', Boolean(h.window.__AAB__.pageHook));
+
+    // the *page* opens its own socket; the hook should relay its frames
+    const pageSocket = new h.window.WebSocket('https://arena.ai/api/agent/stream');
+    pageSocket.emit('open', {});
+    pageSocket.emit('message', { data: 'a0:hello from the page stream' });
+    pageSocket.emit('message', { data: 'ag:thinking' });
+    await sleep(50);
+
+    const frames = h.window.__AAB__.capture.frames;
+    check('frames were captured from the page socket', frames.length >= 2, `${frames.length} frames`);
+    const summary = h.window.__AAB__.capture.summary(null);
+    check('main text length was summed', summary.mainChars > 0, String(summary.mainChars));
+    check('reasoning frames are tracked separately', summary.reasoningChars > 0, String(summary.reasoningChars));
+
+    // and the bridge requests are NOT tapped (only arena.ai traffic is)
+    const bridgeFrames = frames.filter((frame) => frame.url.includes('127.0.0.1'));
+    check('the bridge socket itself is ignored', bridgeFrames.length === 0, JSON.stringify(bridgeFrames));
+    h.close();
+  });
+
+  await test('runtime hook injection (scripting.executeScript in the MAIN world)', async () => {
+    const h = await createHarness({
+      loadHook: false,
+      config: { capture: { ENABLED: true, INJECTION: 'runtime', HOOK_TIMEOUT_MS: 150 } },
+    });
+    await waitFor(() => h.window.__AAB__.capture.hookReady, 3000, 'runtime-injected hook');
+    const calls = h.window.__testScripting.executeScriptCalls;
+    check('background was asked to inject inject.js', calls.length >= 1, JSON.stringify(calls));
+    check('injection targets the MAIN world', calls[0] && calls[0].world === 'MAIN');
+    check('injection uses the shared file', calls[0] && calls[0].files.includes('inject.js'));
+    h.close();
+  });
+
+  await test('firefox-style DOM-only fallback: no hook, still correct answers', async () => {
+    const h = await createHarness({
+      loadHook: false,
+      scripting: 'fail', // Firefox without the granted host permission
+      config: { capture: { ENABLED: true, INJECTION: 'runtime', HOOK_TIMEOUT_MS: 150 } },
+    });
+    const reply = await request(h, { prompt: 'no hook here' });
+    check('answer still complete', reply.response.includes('Hello **world**'), JSON.stringify(reply.response));
+    check('no stream frames were used', (reply.meta.stream && reply.meta.stream.mainChars) === 0,
+      JSON.stringify(reply.meta.stream));
+    const diag = h.window.__AAB__.diagnose();
+    check('diagnostics report the hook as inactive', diag.pageHook.ready === false, JSON.stringify(diag.pageHook));
+    check('diagnostics report the injection mode', diag.pageHook.mode === 'runtime');
+    h.close();
+  });
+
+  await test('the hook never breaks when the page has no streaming at all', async () => {
+    const h = await createHarness();
+    // a page socket that only sends junk/envelopes must not confuse the summary
+    const pageSocket = new h.window.WebSocket('https://arena.ai/api/chat');
+    pageSocket.emit('message', { data: 'not json at all' });
+    pageSocket.emit('message', { data: '' });
+    const reply = await request(h, { prompt: 'junk frames' });
+    check('answer is unaffected', reply.response.includes('Hello **world**'), JSON.stringify(reply.response));
     h.close();
   });
 
