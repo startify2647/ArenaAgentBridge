@@ -127,11 +127,14 @@ JSON text frames, one message per frame.
 ### Extension → server
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.0.0","url":"https://arena.ai/agent"}
+{"type":"hello","client":"chrome-extension","version":"1.3.0","url":"https://arena.ai/agent"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"text or null","error":null,
- "meta":{"duration_ms":8123,"stop_reason":"stable|sse_done|sse_idle|stalled|captcha"}}
+ "meta":{"duration_ms":8123,"stop_reason":"see below","from_stream":false,
+         "kept_working":{"found":true,"clicked":true,"cleared":true,"input":true,"label":"Keep working"},
+         "stream":{"frames":96,"mainChars":812,"reasoningChars":0,"sawDone":true}}}
+{"type":"heartbeat","state":"busy","busy":true,"url":"https://arena.ai/agent"}
 {"type":"diag","id":"<uuid>","state":"idle|answering","busy":false,
  "url":"https://arena.ai/agent",
  "diag":{"selectorCounts":{"input":1,"sendButton":1},"captcha":false,"loggedIn":true},
@@ -141,7 +144,43 @@ JSON text frames, one message per frame.
 `diag` answers a `diagnose` frame (1.2.0+); the admin panel's *Diagnose DOM*
 button and the `/admin/api/browser/diagnose` endpoint use it to show the live
 page state without touching the queue. Extensions older than 1.2.0 ignore the
-request and the server reports `diagnostics_timeout`.
+request and the server reports `diagnostics_timeout`. `selectorCounts` covers
+every selector list in `config.js` (including `keepWorking` and `survey`) and
+`checks` adds `surveyVisible` / `keepWorkingVisible`, which is what you look at
+when only the read-only path works.
+
+### How a turn ends
+
+The extension finishes a turn as soon as **one** of these is true, whichever
+comes first:
+
+| `stop_reason`    | what happened |
+| ---------------- | ------------- |
+| `stable`         | the answer text stopped changing for `STABLE_MS` |
+| `sse_done`       | the site's own stream said it was done |
+| `sse_idle`       | the captured stream went quiet while the text was stable |
+| `stream_text`    | the DOM exposed no answer element, so the text was rebuilt from the captured `a0:` frames |
+| `survey`         | the post-answer poll appeared in the composer (agent mode) |
+| `stalled`        | no growth for `STALL_MS` while a Stop button was still there - partial answer |
+| `site_idle`      | neither the page nor the site stream changed for `IDLE_STALL_MS` - an *error* when there was no text yet, a partial answer otherwise |
+| `timeout_partial`| the request deadline arrived with text in hand (`PARTIAL_ON_TIMEOUT=true`) |
+
+The last two exist so a frozen or backgrounded tab can never hang a request
+until the server's own timeout: the extension reports the stoppage itself, and
+the server maps `site_idle` to `504 page_timeout` with the partial answer
+attached when there is one.
+
+Two more rules matter to a caller:
+
+* **Agent mode only** - after an answer the site shows a three-option poll in
+  the composer; the extension clicks *Keep working* (`AUTO_KEEP_WORKING`), waits
+  for the composer to come back and reports `meta.kept_working`. Direct mode has
+  no survey, so nothing is clicked there.
+* **Keepalive** - a background tab throttles `setInterval`, so every DOM
+  mutation or captured frame also nudges the heartbeat (`HEARTBEAT_MIN_MS`).
+  Without it the server would drop a client that is busy answering.
+* A re-sent `request` with the same `id` (server-side reconnect) is ignored while
+  that turn is still running instead of being answered with `busy`.
 
 `error` is one of: `captcha`, `not_logged_in`, `selector_missing`,
 `submit_failed`, `no_output`, `response_timeout`, `page_error`, `busy`,
@@ -190,6 +229,10 @@ purely to learn *when* generation starts and ends. Frames look like:
 | `ag:`  | reasoning/thinking |
 | `ad:`  | extra data/meta    |
 
-Those prefixes are configurable in `extensions/shared/config.js` (`capture.*`). Only
-lengths and timestamps are used for completion detection - the answer itself is
-still read from the DOM, so a prefix change degrades speed, never correctness.
+Those prefixes are configurable in `extensions/shared/config.js` (`capture.*`).
+Timestamps and frame counts drive completion detection, and the `a0:` frames are
+also decoded (plain text or JSON) so the answer can be rebuilt when the DOM
+exposes no message element - `stop_reason: "stream_text"` and
+`meta.from_stream: true` tell a caller that this fallback was used. A prefix
+change therefore degrades speed, and the text fallback with it, but never turns a
+finished answer into a timeout.

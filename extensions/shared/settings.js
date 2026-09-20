@@ -83,6 +83,36 @@
       help_fa: 'مدت انتظار برای ظاهر شدن کادر چت.',
     },
     {
+      path: 'behavior.IDLE_STALL_MS', group: 'automation', type: 'int', min: 5000, max: 600000, step: 1000,
+      label: 'Site idle timeout (ms)', label_fa: 'مهلت بی‌کاری سایت (ms)',
+      help: 'Neither the page nor the site stream changed for this long ⇒ report `site_idle` instead of hanging.',
+      help_fa: 'اگر نه صفحه و نه استریم سایت این مدت تغییر نکند ⇒ خطای `site_idle` به‌جای معطل ماندن.',
+    },
+    {
+      path: 'behavior.AUTO_KEEP_WORKING', group: 'automation', type: 'bool',
+      label: 'Click “Keep working” after an answer', label_fa: 'کلیک «Keep working» بعد از پاسخ',
+      help: 'Agent mode shows a survey in the composer; answering it frees the box for the next prompt.',
+      help_fa: 'در حالت agent یک نظرسنجی در کادر چت می‌آید؛ پاسخ دادن به آن کادر را برای پرامپت بعدی آزاد می‌کند.',
+    },
+    {
+      path: 'behavior.KEEP_WORKING_WAIT_MS', group: 'automation', type: 'int', min: 0, max: 30000, step: 250,
+      label: 'Survey wait (ms)', label_fa: 'انتظار برای نظرسنجی (ms)',
+      help: 'How long to keep looking for that survey after the answer goes quiet.',
+      help_fa: 'مدتی که پس از آرام شدن پاسخ برای پیدا کردن نظرسنجی صبر می‌شود.',
+    },
+    {
+      path: 'behavior.HEARTBEAT_MIN_MS', group: 'automation', type: 'int', min: 1000, max: 60000, step: 500,
+      label: 'Keepalive interval (ms)', label_fa: 'فاصلهٔ keepalive (ms)',
+      help: 'Activity-driven heartbeat: keeps the server connection in a throttled background tab.',
+      help_fa: 'ضربان مبتنی بر فعالیت: اتصال سرور را در تب پس‌زمینهٔ throttle‌شده زنده نگه می‌دارد.',
+    },
+    {
+      path: 'behavior.PARTIAL_ON_TIMEOUT', group: 'automation', type: 'bool',
+      label: 'Return the partial answer at the deadline', label_fa: 'بازگرداندن پاسخ جزئی در پایان مهلت',
+      help: 'Better a truncated answer than a failed request when the page runs out of time.',
+      help_fa: 'وقتی زمان تمام می‌شود، پاسخ بریده بهتر از درخواست ناموفق است.',
+    },
+    {
       path: 'behavior.RESET_BEFORE_REQUEST', group: 'automation', type: 'bool',
       label: 'Reset chat before every request', label_fa: 'شروع چت تازه پیش از هر درخواست',
       help: 'Clean context, slower, avoids context limits.', help_fa: 'زمینهٔ پاک، کندتر، بدون محدودیت زمینه.',

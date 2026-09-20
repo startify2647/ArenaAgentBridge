@@ -33,6 +33,7 @@
     serverVersion: $('server-version'),
     hook: $('hook'),
     answered: $('answered'),
+    actionLog: $('action-log'),
     errorRow: $('error-row'),
     lastError: $('last-error'),
     permissionCard: $('permission-card'),
@@ -129,6 +130,9 @@
     els.tabState.className = 'v ' + (ownerInfo ? 'ok' : 'muted');
     els.serverVersion.textContent = (ownerInfo && ownerInfo.serverVersion) || source.serverVersion || '-';
     els.answered.textContent = String(source.answered || 0);
+    const lastAction = state && state.lastAction ? state.lastAction : source.lastAction;
+    els.actionLog.textContent = lastAction ? String(lastAction).slice(0, 80) : '-';
+    els.actionLog.title = lastAction ? String(lastAction) : '';
 
     const hook = source.pageHook;
     if (hook) {

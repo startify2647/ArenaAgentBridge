@@ -58,7 +58,11 @@ options*) پیوند دارد.
   و میتوانید در کنسول صفحه هم مقدارها را زنده تغییر دهید:
   `__AAB_CONFIG__.selectors.input.unshift('textarea.my-new-class')`.
 - **منطق خودکارسازی** → `shared/content.js` (`SiteDriver` = کار با DOM، `Pipeline` =
-  تایپ→ارسال→دریافت، `Transport` + `Bridge` = وبسوکت، `PageHook` = هوک اختیاری صفحه).
+  تایپ→ارسال→دریافت، `Transport` + `Bridge` = وب‌سوکت، `PageHook` = هوک اختیاری صفحه).
+  یک نوبت با اولین مورد از این‌ها تمام می‌شود: ثابت شدن متن، اعلام پایان توسط استریم خود
+  سایت، ظهور نظرسنجی پایان پاسخ (حالت agent؛ افزونه روی *Keep working* کلیک می‌کند)،
+  توقف/`site_idle` همراه با پاسخ جزئی، یا رسیدن مهلت درخواست — هیچ‌وقت با معطل ماندن تب
+  فریزشده تا timeout سرور.
 - **تفاوت مرورگرها** → فقط manifestها. کد مشترک موتور را از روی وجود `chrome.*` و
   `browser.runtime.getBrowserInfo` تشخیص میدهد.
 * **چیزهایی که کاربر می‌تواند تغییر دهد** → `shared/settings.js` (فهرست فیلدها،
@@ -69,7 +73,8 @@ options*) پیوند دارد.
 مرورگر ریلود کنید. پیش از بیلد هم میتوانید تست کنید:
 
 ```bash
-node tests/extension_dom_test.mjs        # ۴۹ چک DOM/خودکارسازی، بدون نیاز به مرورگر
+node tests/extension_dom_test.mjs        # ۱۴۰ چک DOM/خودکارسازی/تنظیمات/رابط، بدون نیاز به مرورگر
+node tests/webui_dom_test.mjs            # ۶۰ چک برای رابط پنل مدیریت
 python -m pytest tests/test_extension_static.py tests/test_build.py
 ```
 

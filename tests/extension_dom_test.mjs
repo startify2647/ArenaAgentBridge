@@ -40,6 +40,7 @@ const CONTENT_SRC = readFileSync(path.join(SHARED, 'content.js'), 'utf8');
 const POPUP_SRC = readFileSync(path.join(SHARED, 'popup.js'), 'utf8');
 const OPTIONS_SRC = readFileSync(path.join(SHARED, 'options.js'), 'utf8');
 const POPUP_HTML = readFileSync(path.join(SHARED, 'popup.html'), 'utf8');
+const EXT_VERSION = /CONFIG\.version\s*=\s*'([^']+)'/.exec(CONFIG_SRC)[1];
 const OPTIONS_HTML = readFileSync(path.join(SHARED, 'options.html'), 'utf8');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,6 +65,7 @@ class FakeSite {
     this.submitted = [];
     this.streaming = false;
     this.userMessages = [];
+    this.surveyClicks = [];
   }
 
   wire() {
@@ -92,12 +94,19 @@ class FakeSite {
 
     const doc = this.window.document;
     const user = doc.createElement('div');
-    user.setAttribute('data-message-author-role', 'user');
-    user.textContent = prompt;
+    if (this.options.hideMessages) {
+      // markup changed: no role attributes at all (what a redesign looks like)
+      user.className = 'turn turn-user';
+      user.textContent = prompt;
+    } else {
+      user.setAttribute('data-message-author-role', 'user');
+      user.textContent = prompt;
+    }
     doc.getElementById('chat').appendChild(user);
 
     const assistant = doc.createElement('div');
-    assistant.setAttribute('data-message-author-role', 'assistant');
+    if (this.options.hideMessages) assistant.className = 'turn turn-bot';
+    else assistant.setAttribute('data-message-author-role', 'assistant');
     doc.getElementById('chat').appendChild(assistant);
 
     const stop = doc.createElement('button');
@@ -123,8 +132,39 @@ class FakeSite {
     if (this.options.streamErrors) {
       assistant.innerHTML += '<p>something broke</p>';
     }
-    stop.remove();
+    if (!this.options.keepStop) stop.remove();
     this.streaming = false;
+    if (this.options.survey) this.showSurvey();
+  }
+
+  /**
+   * The post-answer poll the real site shows in the composer after an
+   * agent-mode answer: three options, one of which is "Keep working".  While it
+   * is up the chat box is unusable, which is exactly why the bridge has to
+   * click it before the next request.
+   */
+  showSurvey() {
+    const doc = this.window.document;
+    const form = doc.querySelector('form');
+    const survey = doc.createElement('div');
+    survey.setAttribute('data-testid', 'survey');
+    survey.id = 'survey';
+    ['Keep working', 'Needs work', 'Something else'].forEach((label) => {
+      const button = doc.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        this.surveyClicks.push(label);
+        if (label === 'Keep working') {
+          survey.remove();
+          if (form) form.style.display = '';
+        }
+      });
+      survey.appendChild(button);
+    });
+    doc.body.appendChild(survey);
+    if (form) form.style.display = 'none';
+    this.surveyShown = true;
   }
 
   /** Emit a page-world stream frame (what inject.js would postMessage). */
@@ -133,6 +173,15 @@ class FakeSite {
       { source: 'arena-agent-bridge', kind: 'ws-message', url: 'https://arena.ai/api/chat/stream', data },
       'https://arena.ai'
     );
+  }
+
+  /** Stream the answer only through the site's own socket (no usable DOM). */
+  async streamFrames({ frames, delay = 30 }) {
+    for (const frame of frames) {
+      this.emitStreamFrame(frame);
+      await sleep(delay);
+    }
+    this.emitStreamFrame('a0:{"type":"done","finish_reason":"stop"}');
   }
 }
 
@@ -887,6 +936,7 @@ async function main() {
           tabs: { 7: { state: 'idle', busy: false, serverVersion: '1.2.0' } },
           pageHook: { enabled: true, ready: true, source: 'manifest', mode: 'manifest' },
           answered: 3,
+          lastAction: 'answer sent in 1.7s (survey)',
         },
       },
     });
@@ -894,11 +944,16 @@ async function main() {
 
     const tabs = Array.from(h.document.querySelectorAll('.tabs button'));
     check('the popup has four tabs', tabs.length === 4, String(tabs.length));
-    check('the version comes from config.js', h.$('version').textContent.includes('1.2.0'), h.$('version').textContent);
+    check('the version comes from config.js', h.$('version').textContent.includes(EXT_VERSION), h.$('version').textContent);
     check('the bridge tab is described', h.$('tab-state').textContent.includes('tab 7'), h.$('tab-state').textContent);
     check('the page hook is reported', h.$('hook').textContent.includes('active'), h.$('hook').textContent);
     check('the server version is shown', h.$('server-version').textContent === '1.2.0', h.$('server-version').textContent);
     check('the answered counter is shown', h.$('answered').textContent === '3', h.$('answered').textContent);
+    check(
+      'the last bridge action is shown',
+      h.$('action-log').textContent === 'answer sent in 1.7s (survey)',
+      h.$('action-log').textContent
+    );
 
     tabs[3].click();
     check('clicking a tab selects it', tabs[3].getAttribute('aria-selected') === 'true', tabs.map((b) => b.getAttribute('aria-selected')).join(','));
@@ -953,7 +1008,7 @@ async function main() {
     check('the options page rendered a control per field', inputs.length === fields.length, `${inputs.length} vs ${fields.length}`);
     const rendered = Array.from(inputs).map((input) => input.dataset.path);
     check('every field path is present', fields.every((path) => rendered.includes(path)), rendered.join(','));
-    check('the version is shown', h.$('version').textContent.includes('1.2.0'), h.$('version').textContent);
+    check('the version is shown', h.$('version').textContent.includes(EXT_VERSION), h.$('version').textContent);
     check('the connection group is rendered first', h.document.querySelectorAll('#fields-connection [data-path]').length >= 3, String(h.document.querySelectorAll('#fields-connection [data-path]').length));
 
     // changing a value and saving stores a validated override + pings the tabs
@@ -972,6 +1027,173 @@ async function main() {
     const after = JSON.stringify(h.window.__testStorage.aabOverrides || {});
     check('an out-of-range value is refused', !after.includes('"STABLE_MS":5'), after);
     check('a toast explains the refusal', h.$('toasts').textContent.length > 0, h.$('toasts').textContent);
+    h.close();
+  });
+
+  await test('the bridge reports its progress to the popup state', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'report me', mode: 'agent' });
+    check('the answer came back', Boolean(reply.response), JSON.stringify(reply));
+
+    const states = h.window.__testBridge.sent.filter((m) => m.kind === 'state');
+    check('a state message was sent', states.length > 0, String(states.length));
+    const last = states[states.length - 1];
+    check('the answered counter is reported', last.answered === 1, JSON.stringify(last.answered));
+    check('the last action mentions the answer', /answer sent in/.test(last.lastAction || ''), JSON.stringify(last.lastAction));
+    check('the state is idle again', last.busy === false, JSON.stringify(last.busy));
+
+    // a failing turn must not look like a success
+    // break the composer so the pipeline cannot submit at all
+    const failed = await createHarness({ config: { behavior: { ...FAST_CONFIG.behavior, INPUT_WAIT_MS: 400 } } });
+    failed.window.document.querySelector('form').remove();
+    const bad = await request(failed, { prompt: 'nothing here', mode: 'agent' });
+    check('the failure is reported as an error', Boolean(bad.error), JSON.stringify(bad));
+    const failStates = failed.window.__testBridge.sent.filter((m) => m.kind === 'state');
+    const failLast = failStates[failStates.length - 1];
+    check('the answered counter stays at zero', !failLast || failLast.answered === 0, JSON.stringify(failLast && failLast.answered));
+    check('the popup sees what failed', /failed:/.test((failLast && failLast.lastAction) || ''), JSON.stringify(failLast && failLast.lastAction));
+    failed.close();
+    h.close();
+  });
+
+  await test('the post-answer survey is answered in agent mode', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'do the thing', mode: 'agent' });
+    check('the answer still comes back', (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check(
+      'the completion is reported honestly',
+      ['survey', 'stable', 'sse_idle', 'sse_done'].includes(reply.meta.stop_reason),
+      JSON.stringify(reply.meta.stop_reason)
+    );
+    check('"Keep working" was clicked', h.site.surveyClicks[0] === 'Keep working', JSON.stringify(h.site.surveyClicks));
+    check('only one option was clicked', h.site.surveyClicks.length === 1, JSON.stringify(h.site.surveyClicks));
+    check('the survey is gone', !h.window.document.getElementById('survey'), 'survey still in the DOM');
+    check('the composer is usable again', h.window.document.querySelector('form').style.display !== 'none', h.window.document.querySelector('form').style.display);
+    check('the reply reports the hand-off', Boolean(reply.meta.kept_working && reply.meta.kept_working.clicked), JSON.stringify(reply.meta.kept_working));
+    h.close();
+  });
+
+  await test('the survey ends the wait even without polling the DOM', async () => {
+    const h = await createHarness({
+      site: { survey: true, keepStop: true },
+      config: {
+        behavior: {
+          ...FAST_CONFIG.behavior,
+          POLL_INTERVAL_MS: 2000, // longer than SURVEY_SETTLE_MS
+          STABLE_MS: 5000,
+          SSE_IDLE_MS: 5000,
+          STALL_MS: 4000,
+          IDLE_STALL_MS: 30000,
+        },
+      },
+    });
+    const reply = await request(h, { prompt: 'survey driven turn', mode: 'agent' });
+    check('the survey is the stop reason', reply.meta.stop_reason === 'survey', JSON.stringify(reply.meta.stop_reason));
+    check('the answer was captured', (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check('"Keep working" was clicked', h.site.surveyClicks[0] === 'Keep working', JSON.stringify(h.site.surveyClicks));
+    h.close();
+  });
+
+  await test('direct mode leaves the survey alone', async () => {
+    const h = await createHarness({ site: { survey: true } });
+    const reply = await request(h, { prompt: 'plain request', mode: 'direct' });
+    check('the answer is returned', Boolean(reply.response), JSON.stringify(reply.response));
+    check('nothing was clicked', h.site.surveyClicks.length === 0, JSON.stringify(h.site.surveyClicks));
+    check('the survey is still there', Boolean(h.window.document.getElementById('survey')), 'survey disappeared');
+    check('no hand-off is reported', !reply.meta.kept_working, JSON.stringify(reply.meta.kept_working));
+    h.close();
+  });
+
+  await test('a frozen site is reported as a stoppage, not a hang', async () => {
+    const h = await createHarness({
+      site: { neverAnswers: true, keepStop: true, survey: false },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 500, NO_OUTPUT_MS: 30000, START_CONFIRM_MS: 300 } },
+    });
+    const started = Date.now();
+    const reply = await request(h, { prompt: 'anyone awake?' });
+    const took = Date.now() - started;
+    check('the extension gives up on its own', reply.error === 'site_idle', JSON.stringify(reply));
+    check('it does not wait for the server timeout', took < 4000, `${took}ms`);
+    check('the message explains what happened', /stopped updating/.test(reply.meta.message || ''), reply.meta.message);
+    h.close();
+  });
+
+  await test('a partial answer is handed over when the site freezes mid-answer', async () => {
+    const h = await createHarness({
+      site: { keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, STALL_MS: 400, IDLE_STALL_MS: 30000 } },
+    });
+    const reply = await request(h, { prompt: 'half an answer please' });
+    check('the partial text is returned', Boolean(reply.response) && reply.response.length > 3, JSON.stringify(reply.response));
+    check('the stop reason says the site stalled', reply.meta.stop_reason === 'stalled', JSON.stringify(reply.meta.stop_reason));
+    h.close();
+  });
+
+  await test('a re-sent request (server reconnect) is not answered twice', async () => {
+    const h = await createHarness({
+      site: { neverAnswers: true, keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000 } },
+    });
+    const id = 'resume-1';
+    h.socket.deliver({ type: 'request', id, prompt: 'once only', mode: 'agent', timeout: 30 });
+    await waitFor(() => h.site.submitted.length === 1, 3000, 'the first submit');
+    await sleep(200);
+    h.socket.deliver({ type: 'request', id, prompt: 'once only', mode: 'agent', timeout: 30 });
+    await sleep(300);
+    check('the same prompt was submitted only once', h.site.submitted.length === 1, JSON.stringify(h.site.submitted));
+    const busy = h.ws.sent.filter((m) => m.type === 'response' && m.error === 'busy');
+    check('the duplicate is not answered with a busy error', busy.length === 0, JSON.stringify(busy));
+    h.close();
+  });
+
+  await test('site activity keeps the bridge socket alive', async () => {
+    const h = await createHarness({
+      site: { chunks: ['a', 'b', 'c', 'd', 'e', 'f'], chunkDelay: 60 },
+      config: { behavior: { ...FAST_CONFIG.behavior, HEARTBEAT_MIN_MS: 30, STABLE_MS: 400 } },
+    });
+    const reply = await request(h, { prompt: 'stream for a while' });
+    check('the answer arrives', Boolean(reply.response), JSON.stringify(reply.response));
+    const beats = h.ws.sent.filter((m) => m.type === 'heartbeat');
+    check('DOM activity produced extra heartbeats', beats.length >= 2, `${beats.length} heartbeats`);
+    check('the beats carry the busy state', beats.some((b) => b.busy === true || b.state === 'answering'), JSON.stringify(beats.slice(0, 2)));
+    h.close();
+  });
+
+  await test('the answer is recovered from the site stream when the DOM hides it', async () => {
+    const h = await createHarness({
+      site: { hideMessages: true, keepStop: true },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000, NO_OUTPUT_MS: 4000 } },
+    });
+    // the page never renders a readable answer element, only the site's stream
+    h.site.streamFrames({
+      frames: [
+        'a0:{"type":"text","text":"Hello from "}',
+        'a0:{"type":"text","text":"the stream"}',
+      ],
+    });
+    const reply = await request(h, { prompt: 'stream only please' });
+    check('the stream text is returned', (reply.response || '').includes('Hello from the stream'), JSON.stringify(reply.response));
+    check('it is marked as coming from the stream', reply.meta.from_stream === true, JSON.stringify(reply.meta.from_stream));
+    check('the stop reason is stream_text or sse_done', ['stream_text', 'sse_done', 'sse_idle'].includes(reply.meta.stop_reason), JSON.stringify(reply.meta.stop_reason));
+    check('the stream summary carries the text', (reply.meta.stream || {}).text !== undefined, JSON.stringify(reply.meta.stream));
+    h.close();
+  });
+
+  await test('the answer text is decoded from every known frame shape', async () => {
+    const h = await createHarness({ site: { hideMessages: true, keepStop: true, survey: false },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000, NO_OUTPUT_MS: 4000 } } });
+    h.site.streamFrames({
+      frames: [
+        'data: a0:{"delta":{"content":"delta shape "}}',
+        'a0:[{"text":"array shape "}]',
+        'a0:plain text without json',
+      ],
+    });
+    const reply = await request(h, { prompt: 'all shapes' });
+    const text = reply.response || '';
+    check('the delta shape is decoded', text.includes('delta shape'), JSON.stringify(text));
+    check('the array shape is decoded', text.includes('array shape'), JSON.stringify(text));
+    check('plain text frames are kept', text.includes('plain text without json'), JSON.stringify(text));
     h.close();
   });
 

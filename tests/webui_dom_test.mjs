@@ -28,6 +28,10 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ASSETS = path.join(ROOT, 'server', 'assets');
+// the panel version comes from the server config: never hard-code it here
+const SERVER_VERSION = /version:\s*str\s*=\s*["']([^"']+)["']/.exec(
+  readFileSync(path.join(ROOT, 'server', 'config.py'), 'utf8')
+)[1];
 
 let JSDOM;
 try {
@@ -405,7 +409,7 @@ async function main() {
     check('the shell has no external scripts', !/<script[^>]+src="https?:/.test(shell), 'remote <script src>');
     check('the shell has no external stylesheets', !/<link[^>]+href="https?:/.test(shell), 'remote <link>');
     check('the shell carries the panel config', /window\.__AAB_PANEL__/.test(shell));
-    check('the version is rendered into the page', shell.includes('1.2.0'));
+    check('the version is rendered into the page', shell.includes(SERVER_VERSION), SERVER_VERSION);
     check('the css is self contained (no @import/url(http))', !/@import|url\(\s*['"]?https?:/.test(PANEL_CSS));
     const keys = Array.from(shell.matchAll(/data-i18n="([^"]+)"/g)).map((match) => match[1]);
     check('the shell uses i18n keys', keys.length >= 10, `${keys.length} keys`);

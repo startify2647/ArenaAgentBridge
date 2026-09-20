@@ -37,6 +37,8 @@ const state = {
   owner: null, // { tabId, at }
   tabs: {}, // tabId -> last state report
   lastError: null,
+  lastAction: null,
+  answered: 0,
   claimedAt: null,
 };
 
@@ -65,6 +67,8 @@ function persist(extra) {
     tabs,
     pageHook: state.pageHook || null,
     lastError: state.lastError,
+    lastAction: state.lastAction || null,
+    answered: state.answered || 0,
     claimedAt: state.claimedAt,
     serverUrl: (CFG && CFG.SERVER_WS_URL) || 'ws://127.0.0.1:8000/ws/browser',
     updatedAt: Date.now(),
@@ -188,15 +192,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false });
         return false;
       }
+      const previous = state.tabs[tabId] || {};
       state.tabs[tabId] = {
         state: message.state,
         busy: message.busy,
         lastError: message.lastError,
         lastAnswerMs: message.lastAnswerMs,
+        answered: typeof message.answered === 'number' ? message.answered : previous.answered || 0,
         url: message.url,
         pageHook: message.pageHook || null,
         at: Date.now(),
       };
+      // the tab counter restarts on reload; keep the session total growing
+      const before = previous.answered || 0;
+      if (typeof message.answered === 'number' && message.answered > before) {
+        state.answered = (state.answered || 0) + (message.answered - before);
+      }
+      if (message.lastAction) state.lastAction = message.lastAction;
       if (state.owner && state.owner.tabId === tabId) state.owner.at = Date.now();
       if (!state.owner || state.owner.tabId === tabId) state.pageHook = message.pageHook || state.pageHook;
       if (message.lastError) state.lastError = message.lastError;
@@ -212,6 +224,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           owner: state.owner,
           tabs: state.tabs,
           lastError: state.lastError,
+          lastAction: state.lastAction || null,
+          answered: state.answered || 0,
           browser: state.browser,
           permissions,
           serverUrl: (CFG && CFG.SERVER_WS_URL) || null,

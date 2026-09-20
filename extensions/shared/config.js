@@ -42,6 +42,8 @@
         'form textarea',
         'textarea[placeholder]',
         'div[contenteditable="true"][role="textbox"]',
+        'div[contenteditable="true"].ProseMirror',
+        '[role="textbox"]',
         '[contenteditable="true"]',
         'textarea',
       ],
@@ -52,7 +54,9 @@
         { css: 'button[data-testid="send-button"]' },
         { css: 'button[type="submit"]', text: ['send', 'ask', 'run'] },
         { css: 'form button', text: ['send', 'ask', 'run'] },
+        { css: '[data-testid*="send"]' },
         { css: 'button', text: ['send', 'ask', 'run'], tag: 'button' },
+        { css: '[role="button"]', text: ['send', 'ask', 'run'] },
       ],
       /** Present only while the site is still generating -> used as "still streaming". */
       stopButton: [
@@ -90,6 +94,28 @@
         '[class*="ChatMessage"]',
         'main article',
         'main li[class*="message"]',
+      ],
+      /**
+       * The "how did I do?" poll the site shows in the composer after an
+       * *agent-mode* answer (usually three buttons: Keep working / something
+       * else).  The bridge clicks "Keep working" so the next prompt still has a
+       * free chat box - in `direct` mode this survey does not exist.
+       */
+      keepWorking: [
+        { css: '[data-testid="keep-working"]' },
+        { css: '[data-testid*="keep-working"]' },
+        { css: 'button[aria-label*="keep working" i]' },
+        { css: 'button[aria-label*="keep going" i]' },
+        { css: 'button', text: ['keep working', 'keep going', 'continue working'] },
+        { css: '[role="button"]', text: ['keep working', 'keep going'] },
+      ],
+      /** The poll container itself (only used to recognise the survey). */
+      survey: [
+        '[data-testid*="survey"]',
+        '[data-testid*="feedback"]',
+        '[data-testid*="poll"]',
+        '[class*="survey"]',
+        '[class*="Survey"]',
       ],
       /** Login walls - the bridge never logs in for you. */
       loginWall: [
@@ -153,6 +179,15 @@
       NO_OUTPUT_MS: 60000,
       /** Hard cap per request, mirrors AAB_REQUEST_TIMEOUT on the server. */
       MAX_WAIT_MS: 300000,
+      /**
+       * The *site activity* watchdog: neither the DOM nor the captured stream
+       * changed for this long while the request is running => the page stopped
+       * working (hung generation, dropped socket, frozen tab).  A stoppage is
+       * reported straight away instead of waiting for the server's timeout.
+       */
+      IDLE_STALL_MS: 45000,
+      /** At MAX_WAIT, return the partial answer instead of throwing it away. */
+      PARTIAL_ON_TIMEOUT: true,
       /** Sample DOM for the "site silently ignores empty prompts" guard. */
       MIN_PROMPT_CHARS: 1,
       /** Start a new chat for every bridge request (clean context, slower, less
@@ -161,6 +196,25 @@
       /** Press Escape / click Stop when the answer is accepted, so the tab is
        *  idle for the next request. */
       STOP_AFTER_CAPTURE: false,
+
+      /** --- hand-off & keepalive -------------------------------------------- */
+      /**
+       * Agent mode ends every answer with a small poll in the composer
+       * ("Keep working" / …).  Clicking "Keep working" is what makes the tab
+       * ready for the next prompt.  Off = leave the survey alone (the next
+       * request then has to deal with it).  Never used in `direct` mode.
+       */
+      AUTO_KEEP_WORKING: true,
+      /** How long to keep looking for that survey after the answer goes quiet. */
+      KEEP_WORKING_WAIT_MS: 4000,
+      /** The answer must be quiet this long before the survey ends the turn. */
+      SURVEY_SETTLE_MS: 700,
+      /**
+       * Keepalive while the site is busy: a heartbeat is sent at most this
+       * often, driven by DOM/stream activity, so a throttled background tab
+       * does not lose the socket to the server's ping timeout.
+       */
+      HEARTBEAT_MIN_MS: 5000,
       /** Show a small on-page badge with the bridge state. */
       SHOW_BADGE: true,
     },
@@ -221,7 +275,7 @@
     return base;
   }
 
-  CONFIG.version = '1.2.0';
+  CONFIG.version = '1.3.0';
   CONFIG.VERSION = CONFIG.version; // convenience alias used by the popup / background
 
   // Content scripts, the background worker and the popup all read

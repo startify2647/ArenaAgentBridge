@@ -43,9 +43,10 @@ permissions, `eval`).
 
 Then open <https://arena.ai/agent>, log in, and check the badge in the bottom-right
 corner. The popup shows the server state, the bridge tab, whether the optional
-stream hook is active, a **Quick test** (runs one prompt through the bridge from
-inside the browser), a **Diagnose DOM** button, and a settings tab that links to
-the full options page (*Extension details → Extension options*).
+stream hook is active, the **last action** the bridge took (the first thing to
+look at when "nothing happens"), a **Quick test** (runs one prompt through the
+bridge from inside the browser), a **Diagnose DOM** button, and a settings tab
+that links to the full options page (*Extension details → Extension options*).
 
 The server side has its own dashboard at <http://127.0.0.1:8000/admin> - a live
 panel with the request history, a playground, browser control and runtime
@@ -60,7 +61,10 @@ settings. See [`../docs/WEBUI.md`](../docs/WEBUI.md).
   and the `chrome.storage.local` overrides the popup and options page edit).
 * **Automation logic** → `shared/content.js` (`SiteDriver` = DOM, `Pipeline` =
   type→submit→capture, `Transport` + `Bridge` = WebSocket, `PageHook` = the
-  optional page-world hook).
+  optional page-world hook). A turn ends on the first of: stable text, the site's
+  own stream saying it is done, the post-answer survey appearing (agent mode, the
+  extension clicks *Keep working*), a stall/`site_idle` with a partial answer, or
+  the request deadline - never on a frozen tab hanging until the server timeout.
 * **Browser differences** → only the manifests. The shared code detects the engine
   through `chrome.*` availability and `browser.runtime.getBrowserInfo`.
 
@@ -68,7 +72,7 @@ After editing, rebuild (`python scripts/build-extensions.py`) and reload the
 extension in the browser. Test before you rebuild:
 
 ```bash
-node tests/extension_dom_test.mjs        # 100 DOM/automation/settings/UI checks, no browser
+node tests/extension_dom_test.mjs        # 140 DOM/automation/settings/UI checks, no browser
 node tests/webui_dom_test.mjs            # 60 checks for the admin panel UI
 python -m pytest tests/test_extension_static.py tests/test_build.py
 ```

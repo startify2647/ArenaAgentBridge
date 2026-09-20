@@ -568,6 +568,14 @@ class BrowserBridge:
                 "the page stopped producing output before a stable answer was reached",
                 504,
             ),
+            "site_idle": (
+                "page_timeout",
+                "the arena.ai tab (and its own stream) stopped changing while the "
+                "request was running - the page is frozen, suspended or the session "
+                "ended; check the tab, raise behavior.IDLE_STALL_MS if the page is "
+                "legitimately quiet for that long",
+                504,
+            ),
             "busy": (
                 "browser_busy",
                 "the tab is already answering another request",

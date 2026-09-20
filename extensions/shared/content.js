@@ -261,6 +261,25 @@
     }
   }
 
+  /** First plausible text field of a stream payload (tolerant to shape). */
+  function firstTextField(value, depth) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if ((depth || 0) > 6) return '';
+    if (Array.isArray(value)) {
+      return value.map((item) => firstTextField(item, (depth || 0) + 1)).join('');
+    }
+    const keys = ['text', 'content', 'delta', 'value', 'message', 'answer', 'data'];
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const found = firstTextField(value[key], (depth || 0) + 1);
+        if (found) return found;
+      }
+    }
+    return '';
+  }
+
   function normaliseMarkdown(text) {
     return String(text || '')
       .replace(/\u00a0/g, ' ')
@@ -361,36 +380,85 @@
       return this.frames.slice(Math.min(mark.index, this.frames.length)).filter((f) => f.at >= mark.at - 500);
     },
 
-    /** Aggregate stats for the frames belonging to one request. */
+    /**
+     * Pull the answer text out of one captured frame line.
+     *
+     * The site sends one text chunk per frame (`a0:…`); the payload is either
+     * plain text or a small JSON object.  We do not depend on the exact schema:
+     * known shapes are unwrapped, anything else is used verbatim.
+     */
+    frameText(line, prefixMain) {
+      const body = String(line || '').replace(/^data:\s*/, '').trim();
+      if (!body || !body.startsWith(prefixMain)) return '';
+      let payload = body.slice(prefixMain.length).trim();
+      if (!payload) return '';
+      if (payload.charAt(0) === '{' || payload.charAt(0) === '[') {
+        try {
+          const parsed = JSON.parse(payload);
+          payload = firstTextField(parsed);
+        } catch (_) {
+          /* not JSON after all - use it as it came */
+        }
+      }
+      return payload === null || payload === undefined ? '' : String(payload);
+    },
+
+    /**
+     * Aggregate stats for the frames belonging to one request.
+     *
+     * `text` is the answer as the site's own stream reported it.  It is the
+     * fallback when the DOM does not expose the answer element (markup change,
+     * shadow DOM): without it the bridge would wait forever while the answer
+     * visibly streams in the page.
+     */
     summary(mark) {
       const prefixMain = (CFG.capture && CFG.capture.PREFIX_MAIN) || 'a0:';
       const prefixReason = (CFG.capture && CFG.capture.PREFIX_REASONING) || 'ag:';
       const frames = this.framesSince(mark);
+      const limit = (CFG.capture && CFG.capture.MAX_TEXT_CHARS) || 200000;
       let mainChars = 0;
       let reasoningChars = 0;
       let firstAt = 0;
       let lastAt = 0;
       let sawDone = false;
       let sawError = false;
+      let text = '';
+      let truncated = false;
       for (const frame of frames) {
         const payload = frame.data;
         if (payload === '[DONE]' || /"type"\s*:\s*"done"|"finish_reason"\s*:\s*"(stop|end_turn)"/.test(payload)) {
           sawDone = true;
         }
-        if (/"error"\s*:/.test(payload)) sawError = true;
+        if (/"error\s*":/.test(payload)) sawError = true;
         if (!firstAt) firstAt = frame.at;
         lastAt = frame.at;
         for (const line of payload.split(/\r?\n/)) {
           const body = line.replace(/^data:\s*/, '').trim();
           if (!body) continue;
-          if (body.startsWith(prefixMain)) mainChars += body.slice(prefixMain.length).length;
-          else if (body.startsWith(prefixReason)) reasoningChars += body.slice(prefixReason.length).length;
+          if (body.startsWith(prefixMain)) {
+            mainChars += body.length - prefixMain.length;
+            if (text.length < limit) {
+              const piece = this.frameText(line, prefixMain);
+              if (piece) {
+                // A chunk can be a rewrite (the site re-sends the whole text) or
+                // an append; `startsWith` tells them apart without the DOM.
+                if (text && piece.startsWith(text)) text = piece;
+                else text += piece;
+              }
+            } else {
+              truncated = true;
+            }
+          } else if (body.startsWith(prefixReason)) {
+            reasoningChars += body.length - prefixReason.length;
+          }
         }
       }
       return {
         frames: frames.length,
         mainChars,
         reasoningChars,
+        text: text.slice(0, limit),
+        textTruncated: truncated,
         firstAt,
         lastAt,
         idleMs: lastAt ? Date.now() - lastAt : null,
@@ -454,6 +522,13 @@
 
     flush() {
       this.lastNotifyAt = Date.now();
+      // DOM activity is site activity: keep the bridge socket alive even when
+      // the tab's timers are throttled (see Transport.touch).
+      try {
+        Bridge.touch('dom');
+      } catch (_) {
+        /* Bridge is not constructed yet during boot */
+      }
       const waiters = this.waiters.splice(0, this.waiters.length);
       for (const resolve of waiters) resolve();
     },
@@ -483,7 +558,12 @@
     },
 
     findInput() {
-      return findFirst(this.selectors().input, { visible: true });
+      // Prefer a visible box, but fall back to any match: some layouts keep the
+      // real editor at zero size until it is focused.
+      return (
+        findFirst(this.selectors().input, { visible: true }) ||
+        findFirst(this.selectors().input, { visible: false })
+      );
     },
 
     findSendButton() {
@@ -497,6 +577,49 @@
 
     findNewChatButton() {
       return findFirst(this.selectors().newChat, { visible: true });
+    },
+
+    /** The "Keep working" button of the post-answer survey (agent mode). */
+    findKeepWorking() {
+      return findFirst(this.selectors().keepWorking, { visible: true, enabled: true }) ||
+        findFirst(this.selectors().keepWorking, { visible: true });
+    },
+
+    /** The poll container - only used to know that a survey is on screen. */
+    findSurvey() {
+      const own = findFirst(this.selectors().survey, { visible: true });
+      if (own) return own;
+      return this.findKeepWorking();
+    },
+
+    hasSurvey() {
+      return Boolean(this.findKeepWorking() || findFirst(this.selectors().survey, { visible: true }));
+    },
+
+    /**
+     * Click "Keep working" so the composer is free for the next prompt.
+     *
+     * @param {{waitMs?: number}} options
+     * @returns {Promise<{found: boolean, clicked: boolean, waitedMs: number}>}
+     */
+    async acceptKeepWorking(options) {
+      const opts = options || {};
+      const waitMs = Math.max(0, opts.waitMs || 0);
+      const startedAt = Date.now();
+      let button = this.findKeepWorking();
+      while (!button && Date.now() - startedAt < waitMs) {
+        await sleep(200);
+        button = this.findKeepWorking();
+      }
+      if (!button) return { found: false, clicked: false, waitedMs: Date.now() - startedAt };
+
+      const label = truncate(messageText(button) || button.getAttribute('aria-label') || 'keep working', 40);
+      this.click(button);
+      log('clicked the survey option "%s"', label);
+
+      // Wait until the survey is gone (the site usually swaps the composer back).
+      const gone = await waitFor(() => !this.findKeepWorking(), { timeout: 6000, interval: 200 });
+      return { found: true, clicked: true, cleared: Boolean(gone), label };
     },
 
     hasCaptcha() {
@@ -733,6 +856,8 @@
           assistantMessage: countMatches(s.assistantMessage),
           messageRoleAny: countMatches(s.messageRoleAny),
           messageGeneric: countMatches(s.messageGeneric),
+          keepWorking: countMatches(s.keepWorking),
+          survey: countMatches(s.survey),
           captcha: countMatches(s.captcha),
         },
         checks: {
@@ -744,6 +869,8 @@
           newChatButton: Boolean(this.findNewChatButton()),
           captcha: this.hasCaptcha(),
           loggedOut: this.isLoggedOut(),
+          surveyVisible: this.hasSurvey(),
+          keepWorkingVisible: Boolean(this.findKeepWorking()),
         },
         stream: StreamCapture.summary(null),
         pageHook: {
@@ -935,13 +1062,35 @@
       }
     },
 
+    lastHeartbeatAt: 0,
+
     sendHeartbeat() {
+      this.lastHeartbeatAt = Date.now();
       this.send({
         type: 'heartbeat',
         state: Bridge.busy ? 'answering' : this.state,
         busy: Bridge.busy,
         url: location.href,
       });
+    },
+
+    /**
+     * Activity-driven keepalive.
+     *
+     * The server drops a client it has not heard from for a few ping intervals
+     * (`AAB_HEARTBEAT_INTERVAL` × 3).  A background tab has its `setInterval`
+     * throttled to once a minute (or frozen), so the periodic heartbeat alone is
+     * not enough while a long answer is being captured - but DOM mutations and
+     * captured stream frames still arrive.  Those call `touch()`, which keeps
+     * the socket alive without depending on timers.
+     */
+    touch(reason) {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+      const min = (CFG.behavior && CFG.behavior.HEARTBEAT_MIN_MS) || 5000;
+      if (Date.now() - this.lastHeartbeatAt < min) return false;
+      this.sendHeartbeat();
+      if (CFG.debug && CFG.debug.VERBOSE) log('keepalive (%s)', reason || 'activity');
+      return true;
     },
 
     setState(state, note) {
@@ -963,6 +1112,9 @@
     lastError: null,
     lastRequestAt: 0,
     lastAnswerMs: null,
+    answeredCount: 0,
+    lastAction: null,
+    lastActionAt: 0,
     currentRequest: null,
     heartbeatTimer: null,
 
@@ -979,6 +1131,21 @@
       });
     },
 
+    /** Keepalive hook - see `Transport.touch` for why this is activity-driven. */
+    touch(reason) {
+      return Transport.touch(reason);
+    },
+
+    /**
+     * Remember the last meaningful thing the bridge did.  The popup shows it,
+     * so a user who reports "nothing works" can say what the bridge last saw.
+     */
+    note(action) {
+      this.lastAction = action;
+      this.lastActionAt = Date.now();
+      this.reportState();
+    },
+
     reportState() {
       this.state = Transport.state;
       sendToBackground({
@@ -988,6 +1155,8 @@
         lastError: this.lastError,
         lastRequestAt: this.lastRequestAt,
         lastAnswerMs: this.lastAnswerMs,
+        answered: this.answeredCount,
+        lastAction: this.lastAction,
         url: location.href,
         serverVersion: Transport.serverVersion,
         pageHook: {
@@ -1007,18 +1176,21 @@
         case 'welcome':
           Transport.serverVersion = payload.version;
           log('server welcome', payload);
-          this.reportState();
+          this.note(`connected to server ${payload.version || ''}`.trim());
           return;
         case 'replaced':
           warn('another arena.ai tab took over the bridge connection');
+          this.note('another tab took over the connection');
           Transport.close();
           setTimeout(() => Transport.start(), 3000);
           return;
         case 'cancel':
           this.cancelReason = payload.reason || 'cancelled';
+          this.note(`cancel requested (${this.cancelReason})`);
           return;
         case 'diagnose':
           // The admin panel asks for a snapshot of the live page.
+          this.note('diagnose snapshot requested');
           Transport.send({
             type: 'diag',
             id: payload.id,
@@ -1053,6 +1225,15 @@
 
     async handleRequest(payload) {
       if (this.busy) {
+        // After a reconnect the server re-sends the request it never got an
+        // answer for.  If it is the one we are already answering, ignore the
+        // duplicate instead of failing it (or the answer would be lost).
+        if (this.currentRequest && payload.id === this.currentRequest.id) {
+          log('ignoring the re-sent request %s (already answering it)', String(payload.id).slice(0, 8));
+          this.reportState();
+          return;
+        }
+        this.note('busy: refused a second request');
         Transport.send({
           type: 'response',
           id: payload.id,
@@ -1065,6 +1246,7 @@
       this.cancelReason = null;
       this.currentRequest = payload;
       this.lastRequestAt = Date.now();
+      this.lastAction = `answering: ${String((payload.prompt || '').trim()).slice(0, 60)}`;
       Badge.set('busy', 'answering…');
       this.reportState();
 
@@ -1072,6 +1254,8 @@
       try {
         const result = await Pipeline.run(payload);
         this.lastAnswerMs = Date.now() - started;
+        this.answeredCount += 1;
+        this.lastAction = `answer sent in ${(this.lastAnswerMs / 1000).toFixed(1)}s (${result.stopReason})`;
         Transport.send({
           type: 'response',
           id: payload.id,
@@ -1080,15 +1264,18 @@
           meta: {
             duration_ms: Date.now() - started,
             stop_reason: result.stopReason,
+            from_stream: Boolean(result.fromStream),
             stream: result.stream,
             url: location.href,
             mode: payload.mode || 'agent',
+            kept_working: result.keptWorking || null,
           },
         });
         log('answered %s in %d ms (%s)', String(payload.id).slice(0, 8), Date.now() - started, result.stopReason);
       } catch (error) {
         const code = (error && error.code) || 'unknown_error';
         this.lastError = `${code}: ${(error && error.message) || error}`;
+        this.lastAction = `failed: ${code}`;
         warn('request failed:', this.lastError);
         Transport.send({
           type: 'response',
@@ -1165,7 +1352,35 @@
 
       await this.submit(input, prompt);
 
-      return await this.capture(payload, baseline, prompt, mark);
+      const result = await this.capture(payload, baseline, prompt, mark);
+
+      // Agent mode ends with a poll in the composer - answer it so the next
+      // request finds a free chat box (direct mode has no survey).
+      if ((payload.mode || 'agent') !== 'direct') {
+        result.keptWorking = await this.handOff();
+      }
+      return result;
+    },
+
+    /**
+     * Make sure the tab is ready for the next prompt.
+     *
+     * The post-answer survey ("Keep working" / …) replaces the composer, so an
+     * unanswered survey is exactly what makes the *next* request fail.  This
+     * clicks it, then waits (briefly) for the input box to come back.
+     */
+    async handOff() {
+      const behavior = CFG.behavior || {};
+      if (behavior.AUTO_KEEP_WORKING === false) return { found: false, skipped: true };
+
+      const survey = await SiteDriver.acceptKeepWorking({
+        waitMs: behavior.KEEP_WORKING_WAIT_MS || 4000,
+      });
+      if (survey.clicked) {
+        const inputBack = await waitFor(() => SiteDriver.findInput(), { timeout: 5000, interval: 200 });
+        return { found: true, clicked: true, cleared: Boolean(survey.cleared), input: Boolean(inputBack), label: survey.label };
+      }
+      return { found: survey.found, clicked: false };
     },
 
     /**
@@ -1220,6 +1435,7 @@
 
     async capture(payload, baseline, prompt, mark) {
       const behavior = CFG.behavior || {};
+      const mode = payload.mode || 'agent';
       const ctx = {
         poll: behavior.POLL_INTERVAL_MS || 300,
         stableMs: behavior.STABLE_MS || 3000,
@@ -1228,11 +1444,19 @@
         noOutputMs: behavior.NO_OUTPUT_MS || 60000,
         minAnswerWait: behavior.MIN_ANSWER_WAIT_MS || 1500,
         startConfirmMs: behavior.START_CONFIRM_MS || 15000,
+        /** site-activity watchdog (DOM changes + captured stream frames) */
+        idleStallMs: behavior.IDLE_STALL_MS || 45000,
+        /** the survey is an agent-mode only end-of-turn marker */
+        survey: Boolean(behavior.AUTO_KEEP_WORKING) && mode !== 'direct',
+        surveySettleMs: behavior.SURVEY_SETTLE_MS || 700,
+        partialOnTimeout: behavior.PARTIAL_ON_TIMEOUT !== false,
         maxWait: Math.min((Number(payload.timeout) || 300) * 1000, behavior.MAX_WAIT_MS || 300000),
         startedAt: Date.now(),
         lastText: '',
         stableSince: Date.now(),
         lastChangeAt: Date.now(),
+        lastStreamAt: 0,
+        lastIdleWarnAt: 0,
         sawActivity: false,
         lastSummary: null,
       };
@@ -1249,12 +1473,33 @@
       }
     },
 
+    /**
+     * A capture tick means the tab is alive: nudge the keepalive so the server
+     * does not drop a client whose `setInterval` heartbeat is being throttled.
+     */
+    touchTick() {
+      try {
+        Bridge.touch('tick');
+      } catch (_) {
+        /* the socket is gone - the reconnect logic owns that case */
+      }
+    },
+
     /** One evaluation tick; returns the answer once it looks complete. */
     captureStep(ctx, baseline, prompt, mark) {
       if (Bridge.cancelReason) throw new BridgeFailure(Bridge.cancelReason, 'cancelled by the server');
 
       const elapsed = Date.now() - ctx.startedAt;
       if (elapsed > ctx.maxWait) {
+        // A partial answer beats losing the whole turn: the server's own timeout
+        // is usually longer, so this is the last chance to hand something back.
+        if ((ctx.lastText || ctx.lastSummary && ctx.lastSummary.text) && ctx.partialOnTimeout) {
+          return {
+            text: ctx.lastText || ctx.lastSummary.text,
+            stopReason: 'timeout_partial',
+            stream: ctx.lastSummary,
+          };
+        }
         throw new BridgeFailure('response_timeout', `no stable answer within ${Math.round(ctx.maxWait / 1000)}s`);
       }
       if (SiteDriver.isLoggedOut()) {
@@ -1276,6 +1521,7 @@
         ctx.stableSince = Date.now();
       }
 
+      this.touchTick();
       const summary = StreamCapture.summary(mark);
       ctx.lastSummary = summary;
       const stopVisible = Boolean(SiteDriver.findStopButton());
@@ -1283,11 +1529,35 @@
       const streamIdle = summary.lastAt ? Date.now() - summary.lastAt : null;
       const silentFor = Date.now() - ctx.lastChangeAt;
 
+      // Activity = the DOM grew *or* the site's own stream sent a frame.  This
+      // is the signal the timeout logic keys off: a tab can be throttled to
+      // 1 tick/minute and still be "active" because frames keep arriving.
+      const now = Date.now();
+      if (summary.lastAt && summary.lastAt > ctx.lastStreamAt) ctx.lastStreamAt = summary.lastAt;
+      const lastActivityAt = Math.max(ctx.lastChangeAt, ctx.lastStreamAt, mark && mark.at ? mark.at : 0);
+      const idleSiteFor = now - lastActivityAt;
+
       if (CFG.debug && CFG.debug.LOG_LENGTHS) {
         log(
           `waiting: dom=${ctx.lastText.length} chars, stream=${summary.mainChars} chars, ` +
-            `stop=${stopVisible}, domIdle=${idleFor}ms, streamIdle=${streamIdle}ms`
+            `stop=${stopVisible}, domIdle=${idleFor}ms, streamIdle=${streamIdle}ms, siteIdle=${idleSiteFor}ms`
         );
+      }
+
+      // 0. The DOM did not give us an answer element (markup change, shadow
+      //    DOM, virtualised list) but the site's own stream carries the text:
+      //    use it as soon as the stream has settled, instead of waiting for a
+      //    timeout and losing the turn.
+      if (!ctx.lastText && summary.text) {
+        const streamQuietFor = summary.lastAt ? now - summary.lastAt : Infinity;
+        if (summary.sawDone || streamQuietFor >= ctx.sseIdleMs) {
+          return { text: summary.text, stopReason: 'stream_text', stream: summary, fromStream: true };
+        }
+      }
+
+      // 1. The survey after an agent-mode answer *is* the end-of-turn marker.
+      if (ctx.survey && SiteDriver.hasSurvey() && idleFor >= ctx.surveySettleMs) {
+        return { text: ctx.lastText, stopReason: 'survey', stream: summary };
       }
 
       if (ctx.lastText && elapsed >= ctx.minAnswerWait) {
@@ -1303,6 +1573,24 @@
         if (silentFor >= ctx.stallMs) {
           return { text: ctx.lastText, stopReason: 'stalled', stream: summary };
         }
+      }
+
+      // 2. Site-activity watchdog: nothing moved on the page and no frame
+      //    arrived -> report the stoppage now instead of hanging until the
+      //    server's (much longer) timeout.
+      if (elapsed > ctx.startConfirmMs && idleSiteFor >= ctx.idleStallMs) {
+        if (ctx.lastText) {
+          return { text: ctx.lastText, stopReason: 'site_idle', stream: summary };
+        }
+        throw new BridgeFailure(
+          'site_idle',
+          `the site stopped updating ${Math.round(idleSiteFor / 1000)}s ago (no DOM change, no stream ` +
+            'frame, no answer) - the generation was probably dropped; check the tab'
+        );
+      }
+      if (elapsed > ctx.startConfirmMs + ctx.idleStallMs / 2 && idleSiteFor >= ctx.idleStallMs / 2 && !ctx.lastIdleWarnAt) {
+        ctx.lastIdleWarnAt = now;
+        warn('site has been idle for %dms while a request is running', Math.round(idleSiteFor));
       }
 
       if (!ctx.lastText && !ctx.sawActivity && !stopVisible && elapsed > ctx.startConfirmMs + 4000) {
@@ -1356,6 +1644,7 @@
         Bridge.cancelReason = null;
         Transport.close();
         Transport.start();
+        Bridge.note('reconnecting on request');
         sendResponse({ ok: true });
         return false;
       case 'reload-settings':

@@ -25,7 +25,7 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
-**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.2.0`
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.3.0`
 
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
@@ -264,6 +264,11 @@ Key behaviour knobs in `config.js`:
 | `NO_OUTPUT_MS`      | `60000` | nothing at all ⇒ `no_output` error |
 | `MAX_WAIT_MS`       | `300000`| hard per-request cap |
 | `RESET_BEFORE_REQUEST` | `false` | click "New chat" before every request (clean context, slower) |
+| `IDLE_STALL_MS`     | `45000` | neither the page nor the site stream changed this long ⇒ `site_idle` instead of hanging |
+| `PARTIAL_ON_TIMEOUT`| `true`  | hand over the partial answer when the deadline hits instead of a bare timeout |
+| `AUTO_KEEP_WORKING` | `true`  | agent mode: answer the post-answer survey ("Keep working") so the next prompt can be sent |
+| `KEEP_WORKING_WAIT_MS` | `4000` | how long to keep looking for that survey once the answer goes quiet |
+| `HEARTBEAT_MIN_MS`  | `5000`  | activity-driven keepalive: keeps the socket alive in a throttled background tab |
 | `capture.INJECTION` | `manifest` | how the page-world hook is injected (`manifest` / `runtime`) |
 | `SHOW_BADGE`        | `true`  | on-page status badge |
 
@@ -304,6 +309,13 @@ curl -s http://127.0.0.1:8000/v1/bridge/status | python -m json.tool
 * **`captcha_required`** - solve it by hand in the tab; the bridge will not.
 * **Answers truncated / previous turn included** - tune `STABLE_MS`,
   `SSE_IDLE_MS` and the assistant selectors.
+* **`site_idle`** - the tab stopped changing while a request was in flight (the
+  site froze, the tab was suspended, or the session ended). Nothing is sent back
+  until the site moves again; raise `IDLE_STALL_MS` if your prompts legitimately
+  keep the page quiet for longer.
+* **Nothing works except *Diagnose DOM*** - the automation path found no input
+  box or send button. *Diagnose DOM* lists every selector candidate and its
+  result; the popup's *last action* row says what the bridge last did.
 
 Everything else (long `no_output`, slow responses, port conflicts, reading logs,
 sanitiser false positives, Firefox permission quirks):
@@ -402,7 +414,7 @@ make install          # .venv + server deps + jsdom
 make help             # list every task
 
 make run              # start the bridge server
-make test             # pytest (104) + jsdom (49 checks), no browser needed
+make test             # pytest (163) + jsdom (200 checks), no browser needed
 make lint             # ruff + node --check + manifest JSON
 make build            # dist/chrome + dist/firefox
 make firefox-lint     # Mozilla's validator on dist/firefox
@@ -415,12 +427,14 @@ Three test layers, none of which needs Chrome, Firefox or the network:
    HTTP + WebSocket code paths with a scripted fake browser (queueing, prompt
    assembly, SSE streaming, error mapping, sanitiser, timeouts, disconnects) plus
    the whole `/admin` surface: page, settings, history, browser control, self-check.
-2. **Extension automation and UI** (`tests/extension_dom_test.mjs`, 100 checks;
+2. **Extension automation and UI** (`tests/extension_dom_test.mjs`, 140 checks;
    `tests/webui_dom_test.mjs`, 60 checks) - the real `content.js` inside jsdom
    against a simulated chat page (typing, sending, capture, page-world hook,
-   runtime injection, Firefox DOM-only fallback, failure paths, cancel, standby),
-   the popup/options pages rendered from the shared settings model, and the panel
-   driven against a stubbed API (views, i18n, playground, history, actions).
+   runtime injection, Firefox DOM-only fallback, failure paths, cancel, standby,
+   the post-answer survey, a frozen page, a re-sent request, the stream-text
+   fallback and the activity keepalive), the popup/options pages rendered from the
+   shared settings model, and the panel driven against a stubbed API (views, i18n,
+   playground, history, actions).
 3. **Packaging, docs and static checks** (`tests/test_build.py`, 11 tests;
    `tests/test_extension_static.py`, 22 tests; `tests/test_docs.py`, 38 tests) -
    both manifests validate, the build produces complete loadable packages,

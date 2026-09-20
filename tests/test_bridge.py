@@ -407,6 +407,10 @@ async def test_bridge_error_mapping():
     assert BrowserBridge._bridge_error_for("no_tab", {}).status_code == 503
     assert BrowserBridge._bridge_error_for("timeout", {}).code == "page_timeout"
     assert BrowserBridge._bridge_error_for("selector_missing", {}).code == "dom_changed"
+    # a frozen tab is reported by the extension itself (no server-side waiting)
+    idle = BrowserBridge._bridge_error_for("site_idle", {})
+    assert idle.code == "page_timeout" and idle.status_code == 504
+    assert "stopped changing" in idle.message
     custom = BrowserBridge._bridge_error_for("weird_thing", {"message": "boom", "status_code": 418})
     assert custom.status_code == 418 and custom.message == "boom"
 

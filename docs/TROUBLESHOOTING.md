@@ -97,6 +97,24 @@ Tuning knobs in `extensions/shared/config.js` → `behavior`:
 | previous answer included in the new one    | `selectors.assistantMessage` matches the wrong node; check with *Diagnose DOM* |
 | prompt echoed back as the answer           | the role detection failed - add a `data-*` selector for assistant messages |
 | nothing arrives, `no_output`               | the model is queued or the tab was throttled; raise `NO_OUTPUT_MS`, keep the tab in its own window, disable "Memory Saver" for arena.ai |
+| the answer is visible on the page but never comes back | the DOM no longer exposes the message element; the extension falls back to the captured `a0:` stream text (`stop_reason: stream_text`). If that fails too, *Diagnose DOM* shows `selectorCounts.assistantMessage = 0` - add a selector |
+| `site_idle` on a long prompt               | the page was genuinely quiet for `IDLE_STALL_MS` (45 s): raise it, or keep the tab visible so the site keeps updating |
+| the next prompt fails with `busy` / an empty composer | the post-answer survey was never answered. Agent mode needs `AUTO_KEEP_WORKING=true`; check the popup's *last action* row for `kept_working` |
+
+## Only *Diagnose DOM* works
+
+That button is the read-only path: it only counts nodes. If typing, sending and
+capturing all do nothing, the automation selectors stopped matching the page.
+Order of checks:
+
+1. Popup → *last action*: it says what the bridge last did (`answering: …`,
+   `answer sent in 4.2s (survey)`, `failed: selector_missing`, …).
+2. *Diagnose DOM* → `selectorCounts` (input / sendButton / assistantMessage) and
+   `checks` (`input`, `sendButton`, `surveyVisible`). A zero count is the answer:
+   add a selector to `extensions/shared/config.js`, rebuild, reload.
+3. `pageHook.ready = false` means `inject.js` did not run in the page world - the
+   automation still works through the DOM, only completion detection is slower.
+   Firefox: check the host permission; Chrome: *Reload* the extension.
 
 ## Timeouts
 
@@ -104,6 +122,13 @@ Tuning knobs in `extensions/shared/config.js` → `behavior`:
   the per-request `timeout` field, or `.env` `AAB_REQUEST_TIMEOUT`.
 * Very long tasks (deep agent loops, big code generation) are fine with
   `AAB_REQUEST_TIMEOUT=900`, but Chrome must be allowed to run in the background.
+* `504 page_timeout` with a partial answer in the payload - the deadline was hit
+  while text was already on screen (`PARTIAL_ON_TIMEOUT=true`). Raise the
+  per-request `timeout` for a complete answer.
+* The bridge does not wait for the server timeout when the *site* is the problem:
+  a page (and stream) that stops changing for `IDLE_STALL_MS` produces
+  `site_idle` straight away, and a stream that goes silent with a Stop button
+  still showing produces a partial answer after `STALL_MS`.
 
 ## Streaming looks like one big chunk
 
