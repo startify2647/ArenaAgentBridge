@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ArenaAgentBridge</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --muted: #8b949e;
+        --ok: #3fb950;
+        --bad: #f85149;
+        --warn: #d29922;
+        --accent: #58a6ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        width: 380px;
+        margin: 0;
+        padding: 12px;
+        background: var(--bg);
+        color: var(--text);
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      h1 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
+      h1 span.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+      .dot[data-state='connected'] { background: var(--ok); }
+      .dot[data-state='busy'] { background: var(--warn); }
+      .dot[data-state='error'], .dot[data-state='disconnected'] { background: var(--bad); }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px 10px;
+        margin-bottom: 8px;
+      }
+      .row { display: flex; justify-content: space-between; gap: 8px; }
+      .row + .row { margin-top: 2px; }
+      .muted { color: var(--muted); }
+      .ok { color: var(--ok); }
+      .bad { color: var(--bad); }
+      .warn { color: var(--warn); }
+      button {
+        font: inherit;
+        color: var(--text);
+        background: #21262d;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 9px;
+        cursor: pointer;
+      }
+      button:hover { background: #30363d; }
+      button.primary { border-color: var(--accent); color: var(--accent); }
+      .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+      input[type='text'] {
+        width: 100%;
+        font: inherit;
+        color: var(--text);
+        background: #010409;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 7px;
+      }
+      pre {
+        margin: 0;
+        max-height: 210px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 11px;
+      }
+      footer { color: var(--muted); font-size: 10px; margin-top: 4px; }
+      label { display: block; margin-bottom: 4px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <h1><span class="dot" id="dot"></span>ArenaAgentBridge <span class="muted" id="version"></span></h1>
+
+    <div class="card">
+      <div class="row"><span class="muted">extension</span><span id="ext-state">…</span></div>
+      <div class="row"><span class="muted">bridge tab</span><span id="tab-state">…</span></div>
+      <div class="row"><span class="muted">server</span><span id="server-version" class="muted">-</span></div>
+      <div class="row"><span class="muted">answered</span><span id="answered">0</span></div>
+      <div class="row" id="error-row" hidden><span class="muted">last error</span><span class="bad" id="last-error"></span></div>
+    </div>
+
+    <div class="card">
+      <label for="server-url">server websocket url</label>
+      <input type="text" id="server-url" spellcheck="false" />
+      <div class="buttons" style="margin-top: 6px">
+        <button id="save-server">Save &amp; reconnect</button>
+        <button id="reconnect">Reconnect</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="buttons">
+        <button id="diagnose" class="primary">Diagnose DOM</button>
+        <button id="open-tab">Open arena.ai/agent</button>
+        <button id="cancel">Cancel now</button>
+      </div>
+      <footer>Open the arena.ai/agent tab first; diagnostics describe that tab.</footer>
+    </div>
+
+    <div class="card">
+      <div class="row"><span class="muted">diagnostics</span><span class="muted" id="diag-hint">run it after a failed request</span></div>
+      <pre id="diag" style="margin-top: 6px"></pre>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

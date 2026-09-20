@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# local config / secrets
+.env
+patterns.json
+
+# node (extension DOM tests only)
+node_modules/
+package-lock.json
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+
+# packaging leftovers
+dist/
+build/
+*.zip
