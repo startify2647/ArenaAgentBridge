@@ -129,11 +129,20 @@ data: [DONE]
 ### افزونه → سرور
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.1.0","url":"https://arena.ai/agent"}
+{"type":"hello","client":"chrome-extension","version":"1.2.0","url":"https://arena.ai/agent"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"متن یا null","error":null,
  "meta":{"duration_ms":8123,"stop_reason":"stable|sse_done|sse_idle|stalled|captcha"}}
+{"type":"diag","id":"<uuid>","state":"idle|answering","busy":false,
+ "url":"https://arena.ai/agent",
+ "diag":{"selectorCounts":{"input":1,"sendButton":1},"captcha":false,"loggedIn":true},
+ "config":{"serverUrl":"ws://127.0.0.1:8000/ws/browser","stableMs":3000,"capture":true}}
+
+`diag` پاسخ فریم `diagnose` است (نسخهٔ ۱.۲.۰ به بعد)؛ دکمهٔ *Diagnose DOM* در پنل
+مدیریت و اندپوینت `/admin/api/browser/diagnose` از آن استفاده می‌کنند تا وضعیت
+زندهٔ صفحه را بدون دست‌زدن به صف ببینند. اکستنشن‌های قدیمی‌تر از ۱.۲.۰ این درخواست
+را نادیده می‌گیرند و سرور `diagnostics_timeout` گزارش می‌کند.
 ```
 
 مقادیر مجاز `error`: `captcha`، `not_logged_in`، `selector_missing`، `submit_failed`،
@@ -142,11 +151,17 @@ data: [DONE]
 ### سرور → افزونه
 
 ```jsonc
-{"type":"welcome","version":"1.1.0","queue":0,"timeout_default":300}
+{"type":"welcome","version":"1.2.0","queue":0,"timeout_default":300}
 {"type":"request","id":"<uuid>","prompt":"...","mode":"agent","timeout":300}
 {"type":"ping","ts":1712345678.9}
-{"type":"cancel","id":"<uuid>","reason":"timeout"}
+{"type":"cancel","id":"<uuid>","reason":"timeout|operator"}
 {"type":"replaced","reason":"another arena.ai tab connected"}
+{"type":"diagnose","id":"<uuid>"}
+{"type":"shutdown","reason":"operator disconnected the tab"}   → close code 4004
+
+`cancel` وقتی هم می‌رسد که کسی در پنل مدیریت *Cancel* را بزند (کلاینت HTTP کد
+`499 cancelled` می‌گیرد) و `shutdown` پیش از بسته‌شدن سوکت در *Disconnect* فرستاده
+می‌شود — اکستنشن آن را «بعداً برمی‌گردم» می‌فهمد و با تأخیر ۱۰ ثانیه دوباره وصل می‌شود.
 ```
 
 ### قواعد ترتیب

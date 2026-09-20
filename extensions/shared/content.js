@@ -12,8 +12,10 @@
  *      the answer stops changing,
  *   5. reports `{id, response, error, meta}` back to the server.
  *
- * Everything site-specific lives in config.js; use the popup's "Diagnose DOM"
- * button when a selector stops matching.
+ * Everything site-specific lives in config.js (defaults) and settings.js
+ * (user overrides, applied at boot and on `{kind:'reload-settings'}`); use the
+ * popup's "Diagnose DOM" button - or the admin panel's Browser tab - when a
+ * selector stops matching.
  *
  * Design notes
  *   - Exactly one tab may hold the bridge connection: the background worker
@@ -1015,6 +1017,32 @@
         case 'cancel':
           this.cancelReason = payload.reason || 'cancelled';
           return;
+        case 'diagnose':
+          // The admin panel asks for a snapshot of the live page.
+          Transport.send({
+            type: 'diag',
+            id: payload.id,
+            state: Transport.state,
+            busy: this.busy,
+            injected: Boolean(window.__AAB_INJECTED__),
+            url: location.href,
+            diag: SiteDriver.diagnose(''),
+            config: {
+              serverUrl: Transport.url(),
+              stableMs: (CFG.behavior || {}).STABLE_MS,
+              capture: Boolean(CFG.capture && CFG.capture.ENABLED),
+              overrides: Boolean(UserSettings.ready),
+            },
+          });
+          return;
+        case 'shutdown':
+          // The operator disconnected us from the panel: come back, but slowly.
+          warn('disconnected from the server (%s) - reconnecting in 10s', payload.reason || 'shutdown');
+          Transport.close();
+          Badge.set('standby', 'bridge: disconnected');
+          clearTimeout(this.standbyTimer);
+          this.standbyTimer = setTimeout(() => this.start(), 10000);
+          return;
         case 'request':
           await this.handleRequest(payload);
           return;
@@ -1330,6 +1358,12 @@
         Transport.start();
         sendResponse({ ok: true });
         return false;
+      case 'reload-settings':
+        UserSettings.reload().then(
+          () => sendResponse({ ok: true, serverUrl: Transport.url() }),
+          () => sendResponse({ ok: false })
+        );
+        return true; // async
       default:
         return undefined;
     }
@@ -1419,9 +1453,46 @@
     },
   };
 
+  /**
+   * Apply the user overrides stored by the popup / the options page.
+   *
+   * `settings.js` owns the schema and the validation; it is optional here so the
+   * jsdom suite (which loads config.js + content.js only) keeps working.
+   */
+  const UserSettings = {
+    ready: false,
+    async load() {
+      const api = window.__AAB_SETTINGS__;
+      if (!api || typeof api.load !== 'function') return false;
+      try {
+        const overrides = await api.load();
+        api.apply(overrides, CFG);
+        this.ready = true;
+        return true;
+      } catch (error) {
+        warn('could not read the stored settings', error);
+        return false;
+      }
+    },
+    async reload() {
+      const before = Transport.url();
+      await this.load();
+      const after = Transport.url();
+      if (after !== before) {
+        log('server url changed to %s - reconnecting', after);
+        Transport.close();
+        Transport.start();
+      }
+      if (this.ready) Bridge.reportState();
+      Badge.set(Bridge.busy ? 'busy' : Transport.state, Bridge.busy ? 'answering…' : 'bridge: ' + Transport.state);
+      return after;
+    },
+  };
+
   async function boot() {
     if (document.body) Badge.mount();
     else document.addEventListener('DOMContentLoaded', () => Badge.mount(), { once: true });
+    await UserSettings.load();
     await Transport.loadOverride();
     Bridge.start();
     log('content script ready on', location.href, '- server:', Transport.url());

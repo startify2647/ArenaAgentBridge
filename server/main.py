@@ -11,7 +11,7 @@ Endpoints
 ``GET  /v1/models``             fake model list (``arena-agent``, ...)
 ``WS   /ws/browser``            the Chrome extension connects here
 ``GET  /v1/bridge/status``      JSON status of server + browser connection
-``GET  /``                      small HTML dashboard (handy for a quick look)
+``GET  /`` ``/admin``           the web UI (admin panel + playground)
 ``GET  /healthz`` ``GET /readyz``
 """
 
@@ -25,11 +25,14 @@ import sys
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from .admin import create_admin_router, render_panel_page
+from .auth import api_key_dependency
 from .config import Settings, get_settings
+from .history import RequestHistory, detect_client
 from .mock_browser import maybe_start_mock
 from .models import (
     BridgeMeta,
@@ -53,6 +56,8 @@ from .websocket_manager import BridgeError, BrowserBridge
 
 logger = logging.getLogger("aab.server")
 
+#: Fallback page for ``AAB_PANEL_ENABLED=0`` (the panel itself lives in
+#: ``server/webui.py`` and is served from ``server/admin.py``).
 STATUS_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>ArenaAgentBridge</title>
@@ -114,10 +119,22 @@ def _split_for_stream(text: str, chunk_chars: int) -> List[str]:
     return chunks
 
 
+def _dump_messages(payload: ChatCompletionRequest, limit: int = 4000) -> str:
+    """Flatten the incoming conversation for the panel's history preview."""
+
+    lines: List[str] = []
+    for message in payload.messages:
+        text = message.as_text()
+        if text:
+            lines.append(f"### {message.role}\n{text}")
+    return "\n".join(lines)[:limit]
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or get_settings()
     bridge = BrowserBridge(settings)
     rules = load_rules(settings.patterns_file)
+    history = RequestHistory(settings.history_size)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -147,6 +164,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.bridge = bridge
+    app.state.history = history
 
     app.add_middleware(
         CORSMiddleware,
@@ -156,14 +174,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    async def require_auth(authorization: Optional[str] = Header(default=None)) -> None:
-        if not settings.require_api_key:
-            return
-        token = ""
-        if authorization:
-            token = authorization.split(" ", 1)[1].strip() if " " in authorization else authorization
-        if token != settings.api_key:
-            raise HTTPException(status_code=401, detail="invalid api key")
+    require_auth = api_key_dependency(settings)
+
+    if settings.panel_enabled:
+        app.include_router(
+            create_admin_router(settings=settings, bridge=bridge, history=history, rules=rules)
+        )
+        logger.info("admin panel enabled on http://%s:%s/admin", settings.host, settings.port)
+
+    def request_context(request: Request) -> tuple:
+        """(source, client label) for the history/panel."""
+
+        source = (request.headers.get("x-bridge-source") or "api").strip().lower()
+        if source not in {"api", "panel", "test"}:
+            source = "api"
+        return source, detect_client(request.headers.get("user-agent"))
 
     # ------------------------------------------------------------------
     # OpenAI-compatible surface
@@ -198,6 +223,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     ):
         started = time.time()
         request_id = new_id()
+        source, client_label = request_context(request)
+        #: what the client sent, preamble excluded - the panel's history shows this
+        conversation = _dump_messages(payload)
 
         # The requested model can select the prompt wrapper: `*-direct` skips the
         # agent preamble.  Resolve it *before* building the prompt.
@@ -207,6 +235,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         try:
             prompt, mode = build_prompt(payload.messages, settings, requested_mode)
         except PromptBuildError as exc:
+            history.record(
+                request_id=request_id,
+                source=source,
+                client=client_label,
+                model=payload.model or settings.model_id,
+                mode=payload.mode or settings.default_mode,
+                streamed=bool(payload.stream),
+                status="rejected",
+                http_status=400,
+                error_code="invalid_messages",
+                error_message=str(exc),
+                prompt=_dump_messages(payload),
+                total_ms=int((time.time() - started) * 1000),
+            )
             return _error(400, str(exc), code="invalid_messages")
 
         if payload.model and payload.model not in settings.model_ids:
@@ -222,13 +264,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     bridge=bridge,
                     settings=settings,
                     rules=rules,
+                    history=history,
                     request_id=request_id,
                     prompt=prompt,
+                    conversation=conversation,
                     mode=mode,
                     timeout=timeout,
                     no_sanitize=payload.no_sanitize,
                     model=payload.model or settings.model_id,
                     started=started,
+                    source=source,
+                    client_label=client_label,
                     is_disconnected=request.is_disconnected,
                 ),
                 media_type="text/event-stream",
@@ -241,9 +287,24 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
 
         try:
-            result = await bridge.submit(prompt, mode, timeout)
+            result = await bridge.submit(prompt, mode, timeout, conversation=conversation)
         except BridgeError as exc:
             logger.warning("request failed: %s (%s)", exc.code, exc.message)
+            history.record(
+                request_id=request_id,
+                source=source,
+                client=client_label,
+                model=payload.model or settings.model_id,
+                mode=mode,
+                streamed=False,
+                status="error",
+                http_status=exc.status_code,
+                error_code=exc.code,
+                error_message=exc.message,
+                prompt=conversation,
+                built_chars=len(prompt),
+                total_ms=int((time.time() - started) * 1000),
+            )
             return _error(exc.status_code, exc.message, err_type="bridge_error", code=exc.code)
 
         answer = result.get("response") or ""
@@ -278,6 +339,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             usage=Usage.estimate(prompt, sanitized_text),
             x_bridge=meta,
         )
+        history.record(
+            request_id=request_id,
+            source=source,
+            client=client_label,
+            model=payload.model or settings.model_id,
+            mode=mode,
+            streamed=False,
+            status="ok",
+            http_status=200,
+            prompt=conversation,
+            built_chars=len(prompt),
+            response=sanitized_text,
+            queue_wait_ms=result.get("queue_wait_ms"),
+            browser_duration_ms=(result.get("meta") or {}).get("duration_ms"),
+            total_ms=meta.total_duration_ms,
+            sanitized=report.changed,
+            sanitize_mode=report.mode,
+            sanitize_findings=[finding.as_dict() for finding in report.findings[:16]],
+            stop_reason=(result.get("meta") or {}).get("stop_reason"),
+        )
         return JSONResponse(
             content=response.model_dump(), headers={"X-Request-Id": request_id}
         )
@@ -287,13 +368,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         bridge: BrowserBridge,
         settings: Settings,
         rules: List[tuple],
+        history: RequestHistory,
         request_id: str,
         prompt: str,
+        conversation: str,
         mode: str,
         timeout: float,
         no_sanitize: bool,
         model: str,
         started: float,
+        source: str,
+        client_label: str,
         is_disconnected,
     ) -> AsyncIterator[str]:
         """Emit an OpenAI-style SSE stream.
@@ -313,7 +398,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             yield _sse(first.model_dump(exclude_none=True))
 
-            result = await bridge.submit(prompt, mode, timeout)
+            result = await bridge.submit(prompt, mode, timeout, conversation=conversation)
             answer = (result.get("response") or "")[: settings.max_response_chars]
             sanitized_text, report = sanitize(
                 answer, mode="off" if no_sanitize else settings.sanitize_mode, rules=rules
@@ -327,6 +412,27 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             for chunk in chunks:
                 if await is_disconnected():
                     logger.info("client disconnected mid-stream %s", request_id)
+                    history.record(
+                        request_id=request_id,
+                        source=source,
+                        client=client_label,
+                        model=model,
+                        mode=mode,
+                        streamed=True,
+                        status="aborted",
+                        http_status=499,
+                        error_code="client_disconnected",
+                        error_message="the client closed the SSE stream while replaying chunks",
+                        prompt=conversation,
+                        built_chars=len(prompt),
+                        response=sanitized_text,
+                        queue_wait_ms=result.get("queue_wait_ms"),
+                        browser_duration_ms=(result.get("meta") or {}).get("duration_ms"),
+                        total_ms=int((time.time() - started) * 1000),
+                        sanitized=report.changed,
+                        sanitize_mode=report.mode,
+                        sanitize_findings=[finding.as_dict() for finding in report.findings[:16]],
+                    )
                     return
                 payload = ChatCompletionChunk(
                     id=request_id,
@@ -357,10 +463,45 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 choices=[ChunkChoice(index=0, delta=Delta(), finish_reason="stop")],
                 x_bridge=meta,
             )
+            history.record(
+                request_id=request_id,
+                source=source,
+                client=client_label,
+                model=model,
+                mode=mode,
+                streamed=True,
+                status="ok",
+                http_status=200,
+                prompt=conversation,
+                built_chars=len(prompt),
+                response=sanitized_text,
+                queue_wait_ms=result.get("queue_wait_ms"),
+                browser_duration_ms=(result.get("meta") or {}).get("duration_ms"),
+                total_ms=meta.total_duration_ms,
+                sanitized=report.changed,
+                sanitize_mode=report.mode,
+                sanitize_findings=[finding.as_dict() for finding in report.findings[:16]],
+                stop_reason=(result.get("meta") or {}).get("stop_reason"),
+            )
             yield _sse(final.model_dump(exclude_none=True))
             yield "data: [DONE]\n\n"
         except BridgeError as exc:
             logger.warning("stream failed: %s (%s)", exc.code, exc.message)
+            history.record(
+                request_id=request_id,
+                source=source,
+                client=client_label,
+                model=model,
+                mode=mode,
+                streamed=True,
+                status="error",
+                http_status=exc.status_code,
+                error_code=exc.code,
+                error_message=exc.message,
+                prompt=conversation,
+                built_chars=len(prompt),
+                total_ms=int((time.time() - started) * 1000),
+            )
             yield _sse(
                 {
                     "error": {
@@ -382,6 +523,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.get("/bridge/status", include_in_schema=False)
     async def status() -> Dict[str, Any]:
         data = bridge.stats()
+        data["history"] = history.summary()
+        data["panel"] = {"enabled": settings.panel_enabled, "url": "/admin"}
         data["settings"] = {
             "model_ids": settings.model_ids,
             "default_mode": settings.default_mode,
@@ -412,7 +555,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         )
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def index() -> str:
+    async def index():
+        # With the panel enabled (default) `/` *is* the panel; the tiny fallback
+        # page below is only served when the panel is switched off.
+        if settings.panel_enabled:
+            return render_panel_page(settings)
         stats = bridge.stats()
         browser = (
             f'<span class="ok">connected</span> ({stats["browser"]["clients"][0]["client"]})'

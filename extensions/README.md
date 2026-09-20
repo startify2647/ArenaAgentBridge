@@ -11,7 +11,10 @@ extensions/
 │   ├── content.js          owns the WebSocket, drives the DOM
 │   ├── inject.js           page-world stream hook (optional, read-only)
 │   ├── background.js       connection lease, keepalive, scripting bridge
-│   ├── popup.html/js       status, Diagnose DOM, permissions, cancel
+│   ├── settings.js         settings model: validation, storage, apply, export/import
+│   ├── i18n.js             English/Persian strings + the data-i18n applier
+│   ├── popup.html/js       status, quick test, Diagnose DOM, settings, cancel
+│   ├── options.html/js     the full options page (same model, wider layout)
 │   └── icons/              shared icons
 ├── chrome/manifest.json    service worker, world:MAIN hook, Chrome 111+
 └── firefox/manifest.json   event page, gecko id, opt-in host permissions, FF 128+
@@ -40,13 +43,21 @@ permissions, `eval`).
 
 Then open <https://arena.ai/agent>, log in, and check the badge in the bottom-right
 corner. The popup shows the server state, the bridge tab, whether the optional
-stream hook is active, and a **Diagnose DOM** button.
+stream hook is active, a **Quick test** (runs one prompt through the bridge from
+inside the browser), a **Diagnose DOM** button, and a settings tab that links to
+the full options page (*Extension details → Extension options*).
+
+The server side has its own dashboard at <http://127.0.0.1:8000/admin> - a live
+panel with the request history, a playground, browser control and runtime
+settings. See [`../docs/WEBUI.md`](../docs/WEBUI.md).
 
 ## Editing
 
 * **Selectors / thresholds / behaviour** → `shared/config.js`. Everything is
   documented inline, and the values can be overridden at runtime from the page
   console: `__AAB_CONFIG__.selectors.input.unshift('textarea.my-new-class')`.
+* **What the user can change** → `shared/settings.js` (the field list, validation
+  and the `chrome.storage.local` overrides the popup and options page edit).
 * **Automation logic** → `shared/content.js` (`SiteDriver` = DOM, `Pipeline` =
   type→submit→capture, `Transport` + `Bridge` = WebSocket, `PageHook` = the
   optional page-world hook).
@@ -57,7 +68,8 @@ After editing, rebuild (`python scripts/build-extensions.py`) and reload the
 extension in the browser. Test before you rebuild:
 
 ```bash
-node tests/extension_dom_test.mjs        # 49 DOM/automation checks, no browser needed
+node tests/extension_dom_test.mjs        # 100 DOM/automation/settings/UI checks, no browser
+node tests/webui_dom_test.mjs            # 60 checks for the admin panel UI
 python -m pytest tests/test_extension_static.py tests/test_build.py
 ```
 

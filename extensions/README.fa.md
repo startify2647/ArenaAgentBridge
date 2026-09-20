@@ -13,7 +13,10 @@ extensions/
 │   ├── content.js          مالک وبسوکت؛ خودکارسازی DOM
 │   ├── inject.js           هوک دنیای صفحه برای رصد استریم (اختیاری، فقط خواندن)
 │   ├── background.js       اجارهٔ اتصال، keepalive، پل scripting
-│   ├── popup.html/js       وضعیت، Diagnose DOM، مجوزها، لغو
+│   ├── settings.js         مدل تنظیمات: اعتبارسنجی، ذخیره، اعمال، ورود/خروجی
+│   ├── i18n.js             رشته‌های انگلیسی/فارسی + اعمال‌کنندهٔ data-i18n
+│   ├── popup.html/js       وضعیت، تست سریع، Diagnose DOM، تنظیمات، لغو
+│   ├── options.html/js     صفحهٔ کامل تنظیمات افزونه
 │   └── icons/              آیکونهای مشترک
 ├── chrome/manifest.json    service worker، هوک world:MAIN، کروم ۱۱۱+
 └── firefox/manifest.json   event page، gecko id، مجوز opt-in، فایرفاکس ۱۲۸+
@@ -41,7 +44,13 @@ python scripts/build-extensions.py --zip      # فایل zip برای استور
 
 بعد <https://arena.ai/agent> را باز کنید، وارد شوید و نشان گوشهٔ پایین-راست صفحه را
 ببینید. پاپآپ وضعیت سرور، تبِ متصل، فعال بودن هوک اختیاری استریم و دکمهٔ
-**Diagnose DOM** را نشان میدهد.
+**Diagnose DOM** و یک **تست سریع** (اجرای یک پرامپت از داخل مرورگر) را نشان
+می‌دهد؛ تب تنظیمات هم به صفحهٔ کامل تنظیمات (*Extension details → Extension
+options*) پیوند دارد.
+
+سمت سرور هم داشبورد خودش را دارد: <http://127.0.0.1:8000/admin> — پنل زنده با
+تاریخچهٔ درخواست‌ها، Playground، کنترل مرورگر و تنظیمات زمان اجرا.
+راهنما: [`../docs/WEBUI.fa.md`](../docs/WEBUI.fa.md).
 
 ## ویرایش
 
@@ -52,6 +61,9 @@ python scripts/build-extensions.py --zip      # فایل zip برای استور
   تایپ→ارسال→دریافت، `Transport` + `Bridge` = وبسوکت، `PageHook` = هوک اختیاری صفحه).
 - **تفاوت مرورگرها** → فقط manifestها. کد مشترک موتور را از روی وجود `chrome.*` و
   `browser.runtime.getBrowserInfo` تشخیص میدهد.
+* **چیزهایی که کاربر می‌تواند تغییر دهد** → `shared/settings.js` (فهرست فیلدها،
+  اعتبارسنجی و بازنویسی‌های `chrome.storage.local` که پاپ‌آپ و صفحهٔ تنظیمات
+  ویرایش می‌کنند).
 
 بعد از ویرایش، دوباره بیلد کنید (`python scripts/build-extensions.py`) و افزونه را در
 مرورگر ریلود کنید. پیش از بیلد هم میتوانید تست کنید:

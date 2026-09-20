@@ -132,7 +132,16 @@ JSON text frames, one message per frame.
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"text or null","error":null,
  "meta":{"duration_ms":8123,"stop_reason":"stable|sse_done|sse_idle|stalled|captcha"}}
+{"type":"diag","id":"<uuid>","state":"idle|answering","busy":false,
+ "url":"https://arena.ai/agent",
+ "diag":{"selectorCounts":{"input":1,"sendButton":1},"captcha":false,"loggedIn":true},
+ "config":{"serverUrl":"ws://127.0.0.1:8000/ws/browser","stableMs":3000,"capture":true}}
 ```
+
+`diag` answers a `diagnose` frame (1.2.0+); the admin panel's *Diagnose DOM*
+button and the `/admin/api/browser/diagnose` endpoint use it to show the live
+page state without touching the queue. Extensions older than 1.2.0 ignore the
+request and the server reports `diagnostics_timeout`.
 
 `error` is one of: `captcha`, `not_logged_in`, `selector_missing`,
 `submit_failed`, `no_output`, `response_timeout`, `page_error`, `busy`,
@@ -144,9 +153,16 @@ JSON text frames, one message per frame.
 {"type":"welcome","version":"1.0.0","queue":0,"timeout_default":300}
 {"type":"request","id":"<uuid>","prompt":"...","mode":"agent","timeout":300}
 {"type":"ping","ts":1712345678.9}
-{"type":"cancel","id":"<uuid>","reason":"timeout"}
+{"type":"cancel","id":"<uuid>","reason":"timeout|operator"}
 {"type":"replaced","reason":"another arena.ai tab connected"}
+{"type":"diagnose","id":"<uuid>"}
+{"type":"shutdown","reason":"operator disconnected the tab"}   → close code 4004
 ```
+
+`cancel` also arrives when someone presses *Cancel* in the admin panel (the HTTP
+client gets `499 cancelled`), and `shutdown` is sent before the server closes the
+socket on *Disconnect* - the extension treats it as "come back later" and
+reconnects with a 10 s backoff.
 
 ### Ordering rules
 

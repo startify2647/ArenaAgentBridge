@@ -31,6 +31,8 @@ class FakeWebSocket:
     def __init__(self) -> None:
         self.sent: List[Dict[str, Any]] = []
         self.closed = False
+        #: the code of the last ``close()`` (the bridge uses 4000/4001/4004)
+        self.close_code: Optional[int] = None
 
     async def send_json(self, payload: Dict[str, Any]) -> None:
         if self.closed:
@@ -39,6 +41,7 @@ class FakeWebSocket:
 
     async def close(self, code: int = 1000) -> None:  # pragma: no cover - parity
         self.closed = True
+        self.close_code = code
 
 
 class MockBrowser:
@@ -78,8 +81,40 @@ class MockBrowser:
             while seen < len(self.ws.sent):
                 payload = self.ws.sent[seen]
                 seen += 1
-                if payload.get("type") == "request":
+                kind = payload.get("type")
+                if kind == "request":
                     asyncio.create_task(self._answer(payload))
+                elif kind == "diagnose":
+                    asyncio.create_task(self._diagnose(payload))
+                elif kind == "cancel":
+                    logger.info("mock browser: cancel %s (%s)", payload.get("id"), payload.get("reason"))
+
+    async def _diagnose(self, payload: Dict[str, Any]) -> None:
+        """Answer like the extension does, so the panel's DOM view is demo-able."""
+
+        assert self.client is not None
+        await self.bridge.handle_message(
+            self.client,
+            {
+                "type": "diag",
+                "id": payload.get("id"),
+                "state": "idle",
+                "busy": False,
+                "injected": True,
+                "diag": {
+                    "mock": True,
+                    "url": "mock://arena.ai/agent",
+                    "title": "mock arena.ai tab",
+                    "checks": {"logged_in": True, "captcha": False, "streaming": False},
+                    "selectorCounts": {"input": 1, "sendButton": 1, "stopButton": 0},
+                    "messageCount": self.answered,
+                    "lastRole": "assistant",
+                    "stream": {"frames": 0, "mainChars": 0},
+                    "pageHook": {"ready": True, "source": "mock"},
+                },
+                "config": {"serverUrl": "ws://127.0.0.1:8000/ws/browser", "mock": True},
+            },
+        )
 
     async def _answer(self, payload: Dict[str, Any]) -> None:
         started = time.time()

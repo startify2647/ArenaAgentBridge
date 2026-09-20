@@ -85,6 +85,9 @@ class PendingRequest:
     mode: str
     timeout: float
     future: "asyncio.Future[Dict[str, Any]]"
+    #: what the client actually sent (the agent preamble stripped) - the panel
+    #: shows this, because recognising your own question beats reading the wrapper
+    conversation: str = ""
     created_at: float = field(default_factory=time.time)
     enqueued_at: float = field(default_factory=time.time)
     sent_at: Optional[float] = None
@@ -118,6 +121,8 @@ class BrowserBridge:
         self._pinger: Optional[asyncio.Task] = None
         self._client_ready = asyncio.Event()
         self._running = False
+        #: request-id -> future, for ``diagnose`` round-trips to the extension
+        self._diagnostics: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
 
         # stats
         self.started_at = time.time()
@@ -255,6 +260,10 @@ class BrowserBridge:
             logger.debug("browser status: %s", payload)
             return
 
+        if msg_type in ("diag", "diagnostics"):
+            self._resolve_diagnostics(payload)
+            return
+
         logger.warning("unknown message type from browser: %s", msg_type)
 
     def _resolve(self, payload: Dict[str, Any]) -> None:
@@ -277,6 +286,15 @@ class BrowserBridge:
                 }
             )
 
+    def _resolve_diagnostics(self, payload: Dict[str, Any]) -> None:
+        ident = str(payload.get("id") or "")
+        future = self._diagnostics.pop(ident, None)
+        if future is None:
+            logger.debug("diagnostics payload for an unknown id %s", ident)
+            return
+        if not future.done():
+            future.set_result({key: value for key, value in payload.items() if key not in {"id", "type"}})
+
     def _fail_pending_for(self, client: BrowserClient, code: str, status_code: int, message: str) -> None:
         for request_id, pending in list(self._pending.items()):
             if pending.client is not client:
@@ -290,6 +308,135 @@ class BrowserBridge:
                 )
 
     # ------------------------------------------------------------------
+    # control surface (admin panel)
+    # ------------------------------------------------------------------
+    def set_queue_max(self, size: int) -> int:
+        """Resize the waiting queue without dropping what is already in it."""
+
+        size = max(1, int(size))
+        self._queue._maxsize = size  # noqa: SLF001 - asyncio offers no setter
+        self.settings.queue_max_size = size
+        return size
+
+    def pending_requests(self) -> List[Dict[str, Any]]:
+        """Everything that is queued or currently typed into the page."""
+
+        rows: List[Dict[str, Any]] = []
+        for pending in list(self._pending.values()):
+            if pending.finished:
+                continue
+            rows.append(
+                {
+                    "id": pending.id,
+                    "mode": pending.mode,
+                    "created_at": pending.created_at,
+                    "sent_at": pending.sent_at,
+                    "queued_for_s": round((pending.sent_at or time.time()) - pending.enqueued_at, 2),
+                    "running_for_s": pending.browser_duration_ms() / 1000
+                    if pending.browser_duration_ms() is not None
+                    else None,
+                    "timeout": pending.timeout,
+                    "prompt_preview": (pending.conversation or pending.prompt)[:400],
+                    "prompt_chars": len(pending.conversation or pending.prompt),
+                    "built_chars": len(pending.prompt),
+                }
+            )
+        return sorted(rows, key=lambda row: row["created_at"])
+
+    async def cancel_pending(self, reason: str = "cancelled", notify_browser: bool = True) -> Dict[str, Any]:
+        """Fail every queued/in-flight request and tell the page to stop.
+
+        Queued requests are resolved directly (the worker skips a future that is
+        already done); the one in the page gets a ``cancel`` message so the
+        extension stops capturing.
+        """
+
+        cancelled: List[str] = []
+        client = self.active_client()
+        for request_id, pending in list(self._pending.items()):
+            if pending.finished:
+                continue
+            self._pending.pop(request_id, None)
+            pending.finished = True
+            if not pending.future.done():
+                pending.future.set_result(
+                    {
+                        "error": "cancelled",
+                        "response": None,
+                        "meta": {"message": reason, "status_code": 499},
+                    }
+                )
+            cancelled.append(request_id)
+            if notify_browser and pending.sent_at is not None and client is not None:
+                with contextlib.suppress(Exception):
+                    await client.ws.send_json(
+                        {"type": "cancel", "id": request_id, "reason": reason}
+                    )
+        if client is not None:
+            client.busy = False
+            if client.state == "answering":
+                client.state = "idle"
+        if cancelled:
+            logger.info("cancelled %d request(s) from the admin panel", len(cancelled))
+        return {"cancelled": len(cancelled), "ids": cancelled}
+
+    async def disconnect_all(self, reason: str = "disconnected") -> int:
+        """Drop every browser client (the extension reconnects on its own)."""
+
+        dropped = 0
+        for client in list(self.clients):
+            with contextlib.suppress(Exception):
+                await client.ws.send_json({"type": "shutdown", "reason": reason})
+            with contextlib.suppress(Exception):
+                await client.ws.close(code=4004)
+            await self.disconnect(client)
+            dropped += 1
+        return dropped
+
+    async def ping_clients(self) -> int:
+        """Send a keepalive ping to every connected client."""
+
+        sent = 0
+        for client in list(self.clients):
+            with contextlib.suppress(Exception):
+                await client.ws.send_json({"type": "ping", "ts": time.time()})
+                sent += 1
+        return sent
+
+    async def request_diagnostics(self, timeout: float = 8.0) -> Dict[str, Any]:
+        """Ask the extension to describe the live page (selector hits, captcha…)."""
+
+        client = self.active_client()
+        if client is None:
+            raise BridgeError(
+                "browser_offline",
+                "no extension is connected - load dist/chrome and open https://arena.ai/agent",
+                status_code=503,
+            )
+        loop = asyncio.get_running_loop()
+        ident = str(uuid.uuid4())
+        future: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._diagnostics[ident] = future
+        try:
+            await client.ws.send_json({"type": "diagnose", "id": ident})
+        except Exception as exc:
+            self._diagnostics.pop(ident, None)
+            raise BridgeError(
+                "browser_disconnected", f"could not ask the page: {exc}", status_code=502
+            ) from exc
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise BridgeError(
+                "diagnostics_timeout",
+                "the extension did not answer the diagnostics request - is the "
+                "arena.ai tab still open? (older extension builds ignore it)",
+                status_code=504,
+            ) from exc
+        finally:
+            self._diagnostics.pop(ident, None)
+
+    # ------------------------------------------------------------------
     # queue / worker
     # ------------------------------------------------------------------
     def queue_depth(self) -> int:
@@ -300,6 +447,7 @@ class BrowserBridge:
         prompt: str,
         mode: str,
         timeout: float,
+        conversation: str = "",
     ) -> Dict[str, Any]:
         """Enqueue a prompt and wait for the browser answer.
 
@@ -320,6 +468,7 @@ class BrowserBridge:
             prompt=prompt,
             mode=mode,
             timeout=timeout,
+            conversation=conversation,
             future=loop.create_future(),
         )
         self._pending[pending.id] = pending
@@ -559,9 +708,11 @@ class BrowserBridge:
                 "version": self.settings.version,
                 "uptime_s": round(time.time() - self.started_at, 1),
                 "pending_requests": len(self._pending),
+                "pending": self.pending_requests(),
                 "queue_depth": self.queue_depth(),
                 "queue_max": self.settings.queue_max_size,
                 "sanitize_mode": self.settings.sanitize_mode,
+                "started_at": self.started_at,
             },
             "browser": {
                 "connected": self.has_client(),

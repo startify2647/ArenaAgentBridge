@@ -167,11 +167,19 @@ class Settings:
     heartbeat_interval: float = 20.0
     client_hello_timeout: float = 30.0
 
+    # --- admin panel / history --------------------------------------------
+    #: Serve the web UI on ``/`` (and ``/admin``, ``/ui``, ``/panel``).
+    panel_enabled: bool = True
+    #: Auto-refresh interval of the panel's live views (milliseconds).
+    panel_refresh_ms: int = 2000
+    #: How many completed requests the panel keeps in RAM (0 = no history).
+    history_size: int = 200
+
     # --- misc --------------------------------------------------------------
     log_level: str = "INFO"
     log_json: bool = False
     stats_window: int = 50
-    version: str = "1.1.0"
+    version: str = "1.2.0"
 
     model_ids: List[str] = field(default_factory=list)
 
@@ -209,6 +217,9 @@ class Settings:
             patterns_file=_env("PATTERNS_FILE", d.patterns_file) or d.patterns_file,
             stream_chunk_chars=_env_int("STREAM_CHUNK_CHARS", d.stream_chunk_chars),
             stream_chunk_delay_ms=_env_int("STREAM_CHUNK_DELAY_MS", d.stream_chunk_delay_ms),
+            panel_enabled=_env_bool("PANEL_ENABLED", d.panel_enabled),
+            panel_refresh_ms=_env_int("PANEL_REFRESH_MS", d.panel_refresh_ms),
+            history_size=_env_int("HISTORY_SIZE", d.history_size),
             single_client=_env_bool("SINGLE_CLIENT", d.single_client),
             heartbeat_interval=_env_float("HEARTBEAT_INTERVAL", d.heartbeat_interval),
             client_hello_timeout=_env_float("CLIENT_HELLO_TIMEOUT", d.client_hello_timeout),
@@ -239,6 +250,14 @@ class Settings:
             self.min_request_timeout = 1.0
         if self.max_request_timeout < self.min_request_timeout:
             self.max_request_timeout = self.min_request_timeout
+        if self.panel_refresh_ms < 500:
+            self.panel_refresh_ms = 500
+        if self.panel_refresh_ms > 60000:
+            self.panel_refresh_ms = 60000
+        if self.history_size < 0:
+            self.history_size = 0
+        if self.history_size > 5000:
+            self.history_size = 5000
 
     # ------------------------------------------------------------------
     def clamp_timeout(self, value: Optional[float]) -> float:

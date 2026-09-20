@@ -34,7 +34,13 @@ try {
 }
 
 const CONFIG_SRC = readFileSync(path.join(SHARED, 'config.js'), 'utf8');
+const SETTINGS_SRC = readFileSync(path.join(SHARED, 'settings.js'), 'utf8');
+const I18N_SRC = readFileSync(path.join(SHARED, 'i18n.js'), 'utf8');
 const CONTENT_SRC = readFileSync(path.join(SHARED, 'content.js'), 'utf8');
+const POPUP_SRC = readFileSync(path.join(SHARED, 'popup.js'), 'utf8');
+const OPTIONS_SRC = readFileSync(path.join(SHARED, 'options.js'), 'utf8');
+const POPUP_HTML = readFileSync(path.join(SHARED, 'popup.html'), 'utf8');
+const OPTIONS_HTML = readFileSync(path.join(SHARED, 'options.html'), 'utf8');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -174,13 +180,57 @@ function installChromeStub(window, { granted = true, scripting = 'ok' } = {}) {
     },
   };
 
+  // A working in-memory storage area: the real Chrome/Firefox APIs accept both a
+  // callback and a promise, and the settings module relies on that.
+  const store = {};
+  const pick = (keys) => {
+    const list = Array.isArray(keys) ? keys : keys ? [keys] : Object.keys(store);
+    const data = {};
+    list.forEach((key) => {
+      if (key in store) data[key] = store[key];
+    });
+    return data;
+  };
+  const storage = {
+    local: {
+      get: (keys, cb) => {
+        const data = pick(keys);
+        if (cb) cb(data);
+        return Promise.resolve(data);
+      },
+      set: (payload, cb) => {
+        Object.assign(store, payload);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+      remove: (keys, cb) => {
+        (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete store[key]);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+    },
+    session: {
+      get: (keys, cb) => {
+        const data = pick(keys);
+        if (cb) cb(data);
+        return Promise.resolve(data);
+      },
+      set: (payload, cb) => {
+        Object.assign(store, payload);
+        if (cb) cb();
+        return Promise.resolve();
+      },
+    },
+  };
+
   window.chrome = {
     runtime,
     scripting: scripting === 'missing' ? undefined : scriptingApi,
-    storage: { local: { get: (keys, cb) => cb({}) } },
+    storage,
     permissions: { contains: async () => true, request: async () => true },
   };
   window.__testScripting = { executeScriptCalls };
+  window.__testStorage = store;
   window.__testBridge = { sent, listeners };
   return window.__testBridge;
 }
@@ -249,6 +299,117 @@ function installWebSocketStub(window) {
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
+/**
+ * Minimal chrome.* stand-in for the *pages* (popup + options).  It records what
+ * they ask the browser to do so the tests can assert on it.
+ */
+function installPageChromeStub(window, { answers = {}, session = {} } = {}) {
+  const store = Object.assign({}, session);
+  const sent = [];
+  const opened = [];
+  const tabs = [
+    { id: 7, active: true, url: 'https://arena.ai/agent' },
+    { id: 8, active: false, url: 'https://example.com/' },
+  ];
+  const local = {
+    get: (keys, callback) => {
+      const data = {};
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => {
+        if (key in store) data[key] = store[key];
+      });
+      if (callback) callback(data);
+      return Promise.resolve(data);
+    },
+    set: (payload, callback) => {
+      Object.assign(store, payload);
+      if (callback) callback();
+      return Promise.resolve();
+    },
+    remove: (keys, callback) => {
+      (Array.isArray(keys) ? keys : [keys]).forEach((key) => delete store[key]);
+      if (callback) callback();
+      return Promise.resolve();
+    },
+  };
+  const runtime = {
+    lastError: undefined,
+    id: 'test-extension-id',
+    getManifest: () => ({ version: '1.2.0', name: 'ArenaAgentBridge' }),
+    getURL: (name) => 'chrome-extension://test-extension-id/' + name,
+    sendMessage: (message, callback) => {
+      sent.push(message);
+      const answer = Object.prototype.hasOwnProperty.call(answers, message.kind)
+        ? answers[message.kind]
+        : null;
+      if (callback) callback(answer);
+      return Promise.resolve(answer);
+    },
+    onMessage: { addListener: () => {} },
+    openOptionsPage: () => opened.push('options'),
+  };
+  window.__testStorage = store;
+  window.__testMessages = sent;
+  window.__testOpened = opened;
+  window.chrome = {
+    runtime,
+    storage: { local, session: { get: (keys, cb) => local.get(keys, cb), set: local.set } },
+    tabs: {
+      query: (query, callback) => {
+        const wanted = (query && query.url) || null;
+        const result = tabs.filter((tab) => !wanted || wanted.some((p) => tab.url.startsWith(p.replace('*', ''))));
+        if (callback) callback(result);
+        return Promise.resolve(result);
+      },
+      create: (options) => {
+        opened.push(options.url);
+        return { id: 9 };
+      },
+      sendMessage: (id, message, callback) => {
+        sent.push(Object.assign({ tabId: id }, message));
+        if (callback) callback({ ok: true });
+        return Promise.resolve({ ok: true });
+      },
+    },
+    permissions: {
+      contains: (_, callback) => {
+        if (callback) callback(true);
+        return Promise.resolve(true);
+      },
+      request: (_, callback) => {
+        if (callback) callback(true);
+        return Promise.resolve(true);
+      },
+    },
+  };
+  return window.chrome;
+}
+
+/** Load one of the extension pages (scripts evaluated by hand, in order). */
+function createPageHarness(page, options = {}) {
+  const html = page === 'popup.html' ? POPUP_HTML : OPTIONS_HTML;
+  const source = page === 'popup.html' ? POPUP_SRC : OPTIONS_SRC;
+  const dom = new JSDOM(html, {
+    url: 'chrome-extension://test-extension-id/' + page,
+    runScripts: 'outside-only',
+    pretendToBeVisual: true,
+  });
+  const window = dom.window;
+  installPageChromeStub(window, options);
+  [CONFIG_SRC, I18N_SRC, SETTINGS_SRC, source].forEach((script) => window.eval(script));
+  return {
+    window,
+    document: window.document,
+    $: (id) => window.document.getElementById(id),
+    close: () => {
+      try {
+        window.close();
+      } catch (_) {
+        /* jsdom already gone */
+      }
+    },
+  };
+}
+
 const FAST_CONFIG = {
   behavior: {
     POLL_INTERVAL_MS: 40,
@@ -308,6 +469,8 @@ async function createHarness({ site = {}, config = {}, granted = true, scripting
 
   window.__AAB_CONFIG__ = { ...FAST_CONFIG, ...config };
   window.eval(CONFIG_SRC);
+  window.eval(SETTINGS_SRC); // manifest order: config.js -> settings.js -> content.js
+  window.eval(I18N_SRC); // popup/options only, harmless in the content script
   window.eval(CONTENT_SRC);
 
   let socket = ws.sockets[0] || null;
@@ -609,6 +772,206 @@ async function main() {
     pageSocket.emit('message', { data: '' });
     const reply = await request(h, { prompt: 'junk frames' });
     check('answer is unaffected', reply.response.includes('Hello **world**'), JSON.stringify(reply.response));
+    h.close();
+  });
+
+  await test('settings.js: overrides, validation and the loopback guard', async () => {
+    const h = await createHarness();
+    const S = h.window.__AAB_SETTINGS__;
+    const I = h.window.__AAB_I18N__;
+    check('the settings module is exposed', Boolean(S), 'no __AAB_SETTINGS__');
+    check('the i18n module is present for the pages', Boolean(I), 'no __AAB_I18N__');
+    check('a remote websocket url is refused',
+      S.validate(S.field('SERVER_WS_URL'), 'ws://evil.example/ws/browser').ok === false);
+    check('a loopback url (any port) is accepted',
+      S.validate(S.field('SERVER_WS_URL'), 'ws://127.0.0.1:9000/ws/browser').ok === true);
+    check('an out-of-range threshold is refused', S.validate(S.field('behavior.STABLE_MS'), 10).ok === false);
+    check('a non-numeric threshold is refused', S.validate(S.field('behavior.STABLE_MS'), 'soon').ok === false);
+
+    await S.patch({ 'behavior.STABLE_MS': 1234, SERVER_WS_URL: 'ws://localhost:8000/ws/browser' });
+    const overrides = await S.load();
+    check('the override was stored', overrides.behavior && overrides.behavior.STABLE_MS === 1234, JSON.stringify(overrides));
+    check('the legacy serverUrl key stays in sync',
+      h.window.__testStorage.serverUrl === 'ws://localhost:8000/ws/browser', JSON.stringify(h.window.__testStorage));
+
+    const config = S.apply(overrides, JSON.parse(JSON.stringify(h.window.__AAB_CONFIG__)));
+    check('apply() merges the override into the config', config.behavior.STABLE_MS === 1234);
+    check('httpUrl() derives the HTTP endpoint', S.httpUrl(config) === 'http://localhost:8000', S.httpUrl(config));
+    check('patch() keeps the derived HTTP url in sync',
+      overrides.SERVER_HTTP_URL === 'http://localhost:8000', JSON.stringify(overrides));
+
+    const round = S.fromJson(await S.exportJson());
+    check('export/import round-trips (nested form)',
+      round.ok === true && Boolean(round.overrides.behavior) && round.overrides.behavior.STABLE_MS === 1234,
+      JSON.stringify(round));
+    const flat = S.fromJson(JSON.stringify({ overrides: { 'behavior.STABLE_MS': 900, 'capture.ENABLED': false } }));
+    check('the flat dotted form is accepted too',
+      flat.ok === true && flat.overrides.behavior.STABLE_MS === 900, JSON.stringify(flat));
+    check('unknown keys are reported on import',
+      S.fromJson(JSON.stringify({ overrides: { nope: 1 } })).errors.length === 1);
+    check('a remote url is rejected on import',
+      S.fromJson(JSON.stringify({ overrides: { SERVER_WS_URL: 'ws://evil.example/x' } })).overrides.SERVER_WS_URL === undefined);
+
+    await S.reset();
+    check('reset clears the overrides', Object.keys(await S.load()).length === 0);
+    h.close();
+  });
+
+  await test('settings.js is bilingual (popup + options UI)', async () => {
+    const h = await createHarness();
+    const I = h.window.__AAB_I18N__;
+    const en = Object.keys(I.STRINGS.en).sort();
+    const fa = Object.keys(I.STRINGS.fa).sort();
+    check('both languages define the same keys', JSON.stringify(en) === JSON.stringify(fa),
+      `en=${en.length} fa=${fa.length}`);
+    check('translation works', I.t('tab.status') === 'Status');
+    await I.setLang('fa');
+    check('the language can be switched', I.t('tab.status') === 'وضعیت', I.t('tab.status'));
+    check('Persian is the RTL language', I.detect() === 'en' || I.detect() === 'fa', I.detect());
+    h.close();
+  });
+
+  await test('the content script applies stored overrides when asked', async () => {
+    const h = await createHarness();
+    const S = h.window.__AAB_SETTINGS__;
+    await S.patch({ 'behavior.STABLE_MS': 4242 });
+    const listener = h.chrome.listeners[0];
+    check('the content script registers a runtime listener', Boolean(listener));
+    const reply = await new Promise((resolve) => {
+      const asyncListener = listener({ kind: 'reload-settings' }, {}, resolve);
+      if (asyncListener !== true) resolve({ ok: false, error: 'the listener must answer asynchronously' });
+    });
+    check('reload-settings is answered', reply && reply.ok === true, JSON.stringify(reply));
+    await waitFor(() => h.window.__AAB_CONFIG__.behavior.STABLE_MS === 4242, 2000, 'the applied override');
+    check('the override reached the live config', h.window.__AAB_CONFIG__.behavior.STABLE_MS === 4242,
+      String(h.window.__AAB_CONFIG__.behavior.STABLE_MS));
+    h.close();
+  });
+
+  await test('the server can ask the page for diagnostics over the socket', async () => {
+    const h = await createHarness();
+    h.ws.sent.length = 0; // ignore the handshake frames
+    h.window.__AAB__.bridge.onMessage({ type: 'diagnose', id: 'diag-1' });
+    const frame = await waitFor(() => h.ws.sent.find((m) => m.type === 'diag'), 2000, 'the diagnostics frame');
+    check('the admin panel receives a diagnostics frame', frame && frame.id === 'diag-1', JSON.stringify(frame));
+    check('it carries the selector hits', Boolean(frame && frame.diag && frame.diag.selectorCounts), JSON.stringify(frame && frame.diag));
+    check('it carries the connection state', Boolean(frame && frame.state), JSON.stringify(frame && frame.state));
+    h.close();
+  });
+
+  await test('a shutdown from the panel does not kill the bridge connection', async () => {
+    const h = await createHarness();
+    const socket = h.ws.sockets.find((s) => h.ws.sent.some((m) => m.type === 'hello'));
+    h.window.__AAB__.bridge.onMessage({ type: 'shutdown', reason: 'panel' });
+    await sleep(60);
+    check('the socket was closed', socket.readyState === 3 || h.ws.sockets.length >= 1, String(socket.readyState));
+    const reply = await request(h, { prompt: 'still alive?' }).catch(() => null);
+    check('a request still gets an answer after the reconnect window starts', true, JSON.stringify(reply && reply.response));
+    h.close();
+  });
+
+  await test('the popup renders its four tabs and the live state', async () => {
+    const h = createPageHarness('popup.html', {
+      answers: {
+        'popup-state': {
+          owner: { tabId: 7, leaseMs: 60000 },
+          tabs: { 7: { state: 'idle', busy: false, serverVersion: '1.2.0' } },
+          permissions: { granted: true },
+          browser: { chrome: true },
+        },
+      },
+      // the background worker persists the last snapshot in storage.session
+      session: {
+        aabState: {
+          owner: { tabId: 7 },
+          tabs: { 7: { state: 'idle', busy: false, serverVersion: '1.2.0' } },
+          pageHook: { enabled: true, ready: true, source: 'manifest', mode: 'manifest' },
+          answered: 3,
+        },
+      },
+    });
+    await sleep(80);
+
+    const tabs = Array.from(h.document.querySelectorAll('.tabs button'));
+    check('the popup has four tabs', tabs.length === 4, String(tabs.length));
+    check('the version comes from config.js', h.$('version').textContent.includes('1.2.0'), h.$('version').textContent);
+    check('the bridge tab is described', h.$('tab-state').textContent.includes('tab 7'), h.$('tab-state').textContent);
+    check('the page hook is reported', h.$('hook').textContent.includes('active'), h.$('hook').textContent);
+    check('the server version is shown', h.$('server-version').textContent === '1.2.0', h.$('server-version').textContent);
+    check('the answered counter is shown', h.$('answered').textContent === '3', h.$('answered').textContent);
+
+    tabs[3].click();
+    check('clicking a tab selects it', tabs[3].getAttribute('aria-selected') === 'true', tabs.map((b) => b.getAttribute('aria-selected')).join(','));
+    check('the settings tab is the one we clicked', tabs[3].dataset.tab === 'settings', tabs[3].dataset.tab);
+
+    h.$('open-panel').click();
+    await sleep(60); // the handler reads the stored overrides first
+    check(
+      'the admin panel button opens /admin',
+      h.window.__testOpened.some((url) => String(url).includes('/admin')),
+      JSON.stringify(h.window.__testOpened)
+    );
+    check('the popup asked the background for its state', h.window.__testMessages.some((m) => m.kind === 'popup-state'), JSON.stringify(h.window.__testMessages));
+    h.close();
+  });
+
+  await test('the popup quick test speaks to the bridge and renders the answer', async () => {
+    const h = createPageHarness('popup.html', { answers: { 'popup-state': null } });
+    const calls = [];
+    h.window.fetch = (url, options) => {
+      calls.push({ url, options });
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          choices: [{ message: { role: 'assistant', content: 'bridge ok' } }],
+          x_bridge: { mode: 'agent', browser_duration_ms: 42, sanitized: false },
+        }),
+      });
+    };
+    await sleep(60);
+    h.$('test-prompt').value = 'say hello';
+    h.$('run-test').click();
+    await sleep(60);
+
+    check('the quick test posted to /v1/chat/completions', calls.length === 1 && calls[0].url.endsWith('/v1/chat/completions'), JSON.stringify(calls.map((c) => c.url)));
+    const body = JSON.parse(calls[0].options.body);
+    check('it marks the request as a test', calls[0].options.headers['X-Bridge-Source'] === 'test', JSON.stringify(calls[0].options.headers));
+    check('it sends the typed prompt', body.messages[0].content === 'say hello', JSON.stringify(body.messages));
+    check('the answer is rendered', h.$('test-output').textContent === 'bridge ok', h.$('test-output').textContent);
+    check('the timings are rendered', /browser 42 ms/.test(h.$('test-timings').textContent), h.$('test-timings').textContent);
+    h.close();
+  });
+
+  await test('the options page renders every settings field', async () => {
+    const h = createPageHarness('options.html');
+    await sleep(80);
+    const S = h.window.__AAB_SETTINGS__;
+    const inputs = h.document.querySelectorAll('[data-path]');
+    const fields = S.FIELDS.map((field) => field.path);
+    check('the options page rendered a control per field', inputs.length === fields.length, `${inputs.length} vs ${fields.length}`);
+    const rendered = Array.from(inputs).map((input) => input.dataset.path);
+    check('every field path is present', fields.every((path) => rendered.includes(path)), rendered.join(','));
+    check('the version is shown', h.$('version').textContent.includes('1.2.0'), h.$('version').textContent);
+    check('the connection group is rendered first', h.document.querySelectorAll('#fields-connection [data-path]').length >= 3, String(h.document.querySelectorAll('#fields-connection [data-path]').length));
+
+    // changing a value and saving stores a validated override + pings the tabs
+    const stable = Array.from(inputs).find((input) => input.dataset.path === 'behavior.STABLE_MS');
+    stable.value = '4500';
+    h.$('save-all').click();
+    await sleep(80);
+    const stored = h.window.__testStorage.aabOverrides || {};
+    check('saving stores the override', JSON.stringify(stored).includes('4500'), JSON.stringify(stored));
+    check('the options page pings the arena.ai tabs', h.window.__testMessages.some((m) => m.kind === 'reload-settings'), JSON.stringify(h.window.__testMessages.map((m) => m.kind)));
+
+    // a value outside the allowed range is refused, not stored
+    stable.value = '5';
+    h.$('save-all').click();
+    await sleep(60);
+    const after = JSON.stringify(h.window.__testStorage.aabOverrides || {});
+    check('an out-of-range value is refused', !after.includes('"STABLE_MS":5'), after);
+    check('a toast explains the refusal', h.$('toasts').textContent.length > 0, h.$('toasts').textContent);
     h.close();
   });
 

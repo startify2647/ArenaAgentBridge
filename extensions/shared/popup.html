@@ -6,126 +6,176 @@
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0d1117;
-        --panel: #161b22;
-        --border: #30363d;
-        --text: #c9d1d9;
-        --muted: #8b949e;
+        --bg: #0b0f16;
+        --panel: #151c28;
+        --panel-2: #1b2331;
+        --border: #263143;
+        --text: #e6edf3;
+        --muted: #8b98a9;
         --ok: #3fb950;
         --bad: #f85149;
         --warn: #d29922;
-        --accent: #58a6ff;
+        --accent: #22d3ee;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
       }
       * { box-sizing: border-box; }
       body {
-        width: 390px;
+        width: 400px;
         margin: 0;
         padding: 12px;
         background: var(--bg);
         color: var(--text);
-        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font: 12px/1.5 system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
       }
-      h1 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 6px; }
+      h1 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 7px; }
       h1 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
-      .dot[data-state='connected'] { background: var(--ok); }
-      .dot[data-state='busy'] { background: var(--warn); }
-      .dot[data-state='error'], .dot[data-state='disconnected'] { background: var(--bad); }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 8px 10px;
-        margin-bottom: 8px;
+      h1 .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(63, 185, 80, .18); }
+      h1 .dot.busy { background: var(--warn); }
+      h1 .dot.bad { background: var(--bad); }
+      h1 .ver { margin-inline-start: auto; color: var(--muted); font: 11px var(--mono); font-weight: 400; }
+      .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+      .tabs button {
+        flex: 1; padding: 6px 4px; font: inherit; cursor: pointer;
+        background: transparent; color: var(--muted);
+        border: 1px solid var(--border); border-radius: 7px;
       }
-      .row { display: flex; justify-content: space-between; gap: 8px; }
-      .row + .row { margin-top: 2px; }
-      .muted { color: var(--muted); }
-      .ok { color: var(--ok); }
-      .bad { color: var(--bad); }
-      .warn { color: var(--warn); }
-      button {
-        font: inherit;
-        color: var(--text);
-        background: #21262d;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 5px 9px;
-        cursor: pointer;
+      .tabs button[aria-selected="true"] { color: var(--accent); border-color: var(--accent); background: rgba(34, 211, 238, .08); }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 9px 11px; margin-bottom: 8px; }
+      .row { display: flex; justify-content: space-between; gap: 10px; }
+      .row + .row { margin-top: 3px; }
+      .row .k { color: var(--muted); }
+      .row .v { text-align: end; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+      .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+      .mono { font-family: var(--mono); font-size: 11px; }
+      button.action {
+        font: inherit; cursor: pointer; color: var(--text); background: var(--panel-2);
+        border: 1px solid var(--border); border-radius: 7px; padding: 6px 10px;
       }
-      button:hover { background: #30363d; }
+      button.action:hover { background: #202a3a; }
       button.primary { border-color: var(--accent); color: var(--accent); }
-      button.attention { border-color: var(--warn); color: var(--warn); }
+      button.danger { border-color: rgba(248, 81, 73, .5); color: var(--bad); }
+      button.attention { border-color: rgba(210, 153, 34, .5); color: var(--warn); }
       .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
-      input[type='text'] {
-        width: 100%;
-        font: inherit;
-        color: var(--text);
-        background: #010409;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 5px 7px;
+      input[type="text"], input[type="password"], input[type="number"], textarea, select {
+        width: 100%; font: inherit; color: var(--text); background: #060a11;
+        border: 1px solid var(--border); border-radius: 7px; padding: 6px 8px;
       }
+      textarea { min-height: 56px; resize: vertical; font: 11.5px var(--mono); }
       pre {
-        margin: 6px 0 0;
-        max-height: 200px;
-        overflow: auto;
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-size: 11px;
+        margin: 6px 0 0; max-height: 230px; overflow: auto; white-space: pre-wrap;
+        word-break: break-word; font: 11px var(--mono); background: #060a11;
+        border: 1px solid var(--border); border-radius: 7px; padding: 8px;
       }
-      footer { color: var(--muted); font-size: 10px; margin-top: 4px; }
-      label { display: block; margin-bottom: 4px; color: var(--muted); }
+      label.f { display: block; margin-bottom: 8px; }
+      label.f .n { color: var(--muted); display: block; margin-bottom: 3px; }
+      label.f .h { color: var(--muted); font-size: 10.5px; }
+      .check { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+      .check input { width: auto; }
+      footer { color: var(--muted); font-size: 10.5px; margin-top: 4px; display: flex; gap: 10px; flex-wrap: wrap; }
+      a { color: var(--accent); }
       [hidden] { display: none !important; }
+      .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); font-size: 10.5px; }
     </style>
   </head>
   <body>
-    <h1><span class="dot" id="dot"></span>ArenaAgentBridge <span class="muted" id="version"></span></h1>
+    <h1><span class="dot" id="dot"></span><span data-i18n="app.name">ArenaAgentBridge</span><span class="ver" id="version"></span></h1>
 
-    <div class="card">
-      <div class="row"><span class="muted">extension</span><span id="ext-state">…</span></div>
-      <div class="row"><span class="muted">browser</span><span id="browser" class="muted">-</span></div>
-      <div class="row"><span class="muted">bridge tab</span><span id="tab-state">…</span></div>
-      <div class="row"><span class="muted">server</span><span id="server-version" class="muted">-</span></div>
-      <div class="row"><span class="muted">page hook</span><span id="hook" class="muted">-</span></div>
-      <div class="row"><span class="muted">answered</span><span id="answered">0</span></div>
-      <div class="row" id="error-row" hidden><span class="muted">last error</span><span class="bad" id="last-error"></span></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="status" aria-selected="true" data-i18n="tab.status">Status</button>
+      <button role="tab" data-tab="test" aria-selected="false" data-i18n="tab.test">Quick test</button>
+      <button role="tab" data-tab="diagnose" aria-selected="false" data-i18n="tab.diagnose">Diagnose</button>
+      <button role="tab" data-tab="settings" aria-selected="false" data-i18n="tab.settings">Settings</button>
     </div>
 
-    <div class="card" id="permission-card" hidden>
-      <div class="row"><span class="muted">permissions</span><span class="warn" id="permission-state">not granted</span></div>
-      <footer>
-        Firefox treats host permissions as opt-in. Grant them once and the extension can
-        reach <code>127.0.0.1:8000</code> and inject the optional stream hook.
-      </footer>
-      <div class="buttons" style="margin-top: 6px">
-        <button id="grant" class="attention">Grant permissions</button>
+    <!-- ------------------------------------------------------------ status -->
+    <section data-pane="status">
+      <div class="card">
+        <div class="row"><span class="k" data-i18n="pop.extension">extension</span><span class="v" id="state">…</span></div>
+        <div class="row"><span class="k" data-i18n="pop.browser">browser</span><span class="v muted" id="browser">-</span></div>
+        <div class="row"><span class="k" data-i18n="pop.bridgeTab">bridge tab</span><span class="v" id="tab-state">…</span></div>
+        <div class="row"><span class="k" data-i18n="pop.server">server</span><span class="v muted" id="server-version">-</span></div>
+        <div class="row"><span class="k" data-i18n="pop.pageHook">page hook</span><span class="v muted" id="hook">-</span></div>
+        <div class="row"><span class="k" data-i18n="pop.answered">answered</span><span class="v" id="answered">0</span></div>
+        <div class="row" id="error-row" hidden><span class="k" data-i18n="pop.lastError">last error</span><span class="v bad" id="last-error"></span></div>
       </div>
-    </div>
 
-    <div class="card">
-      <label for="server-url">server websocket url</label>
-      <input type="text" id="server-url" spellcheck="false" />
-      <div class="buttons" style="margin-top: 6px">
-        <button id="save-server">Save &amp; reconnect</button>
-        <button id="reconnect">Reconnect</button>
+      <div class="card" id="permission-card" hidden>
+        <div class="row"><span class="k" data-i18n="pop.permissions">permissions</span><span class="v warn" id="permission-state">-</span></div>
+        <footer><span data-i18n="pop.grantHint"></span></footer>
+        <div class="buttons" style="margin-top: 6px">
+          <button class="action attention" id="grant" data-i18n="pop.grant">Grant permissions</button>
+        </div>
       </div>
-    </div>
 
-    <div class="card">
-      <div class="buttons">
-        <button id="diagnose" class="primary">Diagnose DOM</button>
-        <button id="open-tab">Open arena.ai</button>
-        <button id="cancel">Cancel now</button>
+      <div class="card">
+        <div class="buttons">
+          <button class="action primary" id="open-tab" data-i18n="pop.openSite">Open arena.ai</button>
+          <button class="action" id="open-panel" data-i18n="pop.openPanel">Admin panel</button>
+          <button class="action" id="open-options" data-i18n="pop.advanced">Advanced settings</button>
+          <button class="action" id="reconnect" data-i18n="pop.reconnect">Reconnect</button>
+          <button class="action danger" id="cancel" data-i18n="pop.cancel">Cancel now</button>
+        </div>
+        <footer style="margin-top: 8px">
+          <span class="mono" id="ws-url">ws://127.0.0.1:8000/ws/browser</span>
+        </footer>
       </div>
-      <footer>Open the arena.ai tab first; diagnostics describe that tab.</footer>
-    </div>
+    </section>
 
-    <div class="card">
-      <div class="row"><span class="muted">diagnostics</span><span class="muted" id="diag-hint">run it after a failed request</span></div>
-      <pre id="diag"></pre>
-    </div>
+    <!-- -------------------------------------------------------------- test -->
+    <section data-pane="test" hidden>
+      <div class="card">
+        <footer style="margin: 0 0 8px"><span data-i18n="pop.testHint"></span></footer>
+        <textarea id="test-prompt" data-i18n-placeholder="pop.testPrompt">Reply with exactly: bridge ok</textarea>
+        <div class="buttons" style="margin-top: 8px">
+          <button class="action primary" id="run-test" data-i18n="pop.send">Send test</button>
+          <button class="action" id="copy-answer" data-i18n="pop.copy">Copy</button>
+        </div>
+        <div class="row" style="margin-top: 8px"><span class="k" id="test-status">-</span><span class="v mono" id="test-timings"></span></div>
+        <pre id="test-output">-</pre>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------- diagnose -->
+    <section data-pane="diagnose" hidden>
+      <div class="card">
+        <div class="buttons">
+          <button class="action primary" id="diagnose" data-i18n="pop.runDiagnose">Diagnose DOM</button>
+          <button class="action" id="copy-diag" data-i18n="pop.copy">Copy</button>
+        </div>
+        <pre id="diag">-</pre>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------- settings -->
+    <section data-pane="settings" hidden>
+      <div class="card">
+        <label class="f">
+          <span class="n" data-i18n="pop.serverUrl">server websocket url</span>
+          <input type="text" id="server-url" spellcheck="false" />
+          <span class="h" data-i18n="set.serverUrlHint">Loopback only.</span>
+        </label>
+        <div class="buttons">
+          <button class="action primary" id="save-server" data-i18n="pop.saveServer">Save &amp; reconnect</button>
+          <button class="action" id="open-options-2" data-i18n="set.options">Open the full options page</button>
+        </div>
+      </div>
+      <div class="card" id="quick-settings"></div>
+      <div class="card">
+        <div class="buttons">
+          <button class="action" id="lang-toggle" data-i18n="set.language">Language</button>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <span>v<span id="version-2"></span></span>
+      <a href="https://github.com/startify2647/ArenaAgentBridge" target="_blank" rel="noreferrer">GitHub</a>
+      <span class="mono">127.0.0.1</span>
+    </footer>
 
     <script src="config.js"></script>
+    <script src="i18n.js"></script>
+    <script src="settings.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

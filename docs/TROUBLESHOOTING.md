@@ -146,3 +146,18 @@ single request. For finer control, write your own rules and point
   the agent preamble costs a few hundred tokens per request.
 * Setting `behavior.RESET_BEFORE_REQUEST = true` starts a fresh chat per request:
   slower, but immune to context-limit degradation in long sessions.
+
+## The admin panel / extension UI
+
+| symptom | cause / fix |
+| --- | --- |
+| `/admin` shows the small fallback page | `AAB_PANEL_ENABLED=0` - set it to `1` and restart the server |
+| the panel asks for a token | `AAB_REQUIRE_API_KEY=1`; paste the `AAB_API_KEY` value (it is kept in `localStorage`, never sent anywhere but loopback) |
+| *Diagnose DOM* → `diagnostics_timeout` | the loaded extension is older than 1.2.0 (rebuild + reload) or the tab is not on arena.ai |
+| the panel is empty / all counters zero | no extension attached - open <https://arena.ai/agent> and log in; check *Browser* |
+| history stays empty | `AAB_HISTORY_SIZE=0`, or the server restarted (the history is RAM-only by design) |
+| the panel does not refresh | the refresh is paused (header button) or the tab is in the background - Chrome throttles timers, the panel skips ticks while hidden |
+| settings were rejected | the form shows the reason per field; read-only values (`AAB_HOST`, `AAB_PORT`, CORS, mock) must be changed in `.env` and need a restart |
+| the popup's *Quick test* fails in Firefox | host permissions were not granted yet - use the permission card in the popup |
+
+Full reference: [`WEBUI.md`](WEBUI.md).

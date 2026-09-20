@@ -221,7 +221,7 @@
     return base;
   }
 
-  CONFIG.version = '1.1.0';
+  CONFIG.version = '1.2.0';
   CONFIG.VERSION = CONFIG.version; // convenience alias used by the popup / background
 
   // Content scripts, the background worker and the popup all read

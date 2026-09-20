@@ -17,8 +17,9 @@ is the directory you load in the browser. Nothing is duplicated in git.
     python scripts/build-extensions.py --check        # validate, write nothing
 
 The script also validates that every file referenced by a manifest was actually
-copied, that the versions agree with `shared/config.js`, and that no
-browser-specific API leaked into the wrong manifest.
+copied (including the options page), that the versions agree with
+`shared/config.js`, that no browser-specific API leaked into the wrong manifest,
+and that no shipped script uses `eval()` or points at a remote host.
 """
 
 from __future__ import annotations
@@ -92,6 +93,9 @@ def referenced_files(manifest: Dict) -> List[str]:
     action = manifest.get("action") or manifest.get("browser_action") or {}
     if action.get("default_popup"):
         files.append(action["default_popup"])
+    options_page = (manifest.get("options_ui") or {}).get("page") or manifest.get("options_page")
+    if options_page:
+        files.append(options_page)
     for size in ("default_icon", "icons"):
         icons = manifest.get(size) if size == "icons" else action.get("default_icon") or {}
         files.extend((icons or {}).values())
@@ -141,7 +145,12 @@ def validate(browser: str, manifest: Dict, output: Path) -> None:
     if missing:
         fail(f"{browser}: manifest references missing files: {', '.join(missing)}")
 
-    for script in ("content.js", "background.js", "config.js", "inject.js", "popup.js"):
+    # Every JavaScript file we ship is checked, so a new UI file cannot smuggle
+    # in remote code or an eval() call.
+    scripts = sorted(path.name for path in output.glob("*.js"))
+    if not scripts:  # pragma: no cover - a package without scripts is broken
+        fail(f"{browser}: no JavaScript was copied")
+    for script in scripts:
         text = (output / script).read_text(encoding="utf-8")
         if re.search(r"\beval\s*\(", text) or "new Function(" in text:
             fail(f"{browser}: {script} uses dynamic code evaluation")

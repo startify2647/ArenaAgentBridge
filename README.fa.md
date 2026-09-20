@@ -23,7 +23,7 @@ Open WebUI یا حتی `curl`) را به رابط وب [Arena.ai](https://arena.
 
 | موضوع | مقدار |
 | --- | --- |
-| نسخه | `1.1.0` |
+| نسخه | `1.2.0` |
 | زبانها | Python 3.10+ (سرور)، JavaScript ES2020 (افزونه) |
 | سرور | FastAPI + uvicorn روی `127.0.0.1:8000` |
 | مرورگرها | Chrome/Edge 111+ و Firefox 128+ (Manifest V3) |
@@ -92,6 +92,10 @@ Hermes / OpenClaw / curl
 | فایل | نقش |
 | --- | --- |
 | `main.py` | اندپوینتهای OpenAI، جریان SSE، داشبورد HTML، وبسوکت افزونه |
+| `admin.py` | پنل `/admin` و API جیسون آن |
+| `webui.py` + `assets/` | پوستهٔ پنل و فایل‌های `panel.css` / `panel.js` |
+| `history.py` | تاریخچهٔ محدود درون‌حافظه‌ای درخواست‌ها |
+| `auth.py` | بررسی مشترک `Authorization` برای `/v1` و `/admin/api` |
 | `config.py` | خواندن تنظیمات از محیط یا فایل `.env` |
 | `models.py` | مدلهای Pydantic برای OpenAI و پروتکل مرورگر |
 | `prompt_builder.py` | تبدیل `messages[]` به یک متن برچسبدار |
@@ -108,7 +112,10 @@ extensions/
 │   ├── content.js       مالک وبسوکت؛ تایپ، کلیک Send، خواندن پاسخ
 │   ├── inject.js        هوک دنیای صفحه برای رصد استریم سایت (فقط خواندن)
 │   ├── background.js    اجارهٔ اتصال به یک تب، keepalive، تزریق مجدد اسکریپت
-│   ├── popup.html/js    وضعیت، «Diagnose DOM»، مجوزها (فایرفاکس)، لغو
+│   ├── settings.js      مدل تنظیمات/بازنویسی مشترک (اعتبارسنجی، ذخیره، خروجی)
+│   ├── i18n.js          رشته‌های انگلیسی/فارسی + اعمال‌کنندهٔ data-i18n
+│   ├── popup.html/js    وضعیت، «تست سریع»، «Diagnose DOM»، تنظیمات، لغو
+│   ├── options.html/js  صفحهٔ کامل تنظیمات افزونه
 │   └── icons/           آیکونهای تولیدشده
 ├── chrome/manifest.json    service worker · world:MAIN · کروم ۱۱۱+
 └── firefox/manifest.json   event page · gecko id · مجوزهای opt-in · فایرفاکس ۱۲۸+
@@ -220,6 +227,34 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 
 ---
 
+## رابط کاربری وب و پنل مدیریت
+
+دو رابط همراه پروژه می‌آید؛ هر دو فقط محلی‌اند، مرحلهٔ build جداگانه و فایل
+بیرونی (CDN) ندارند:
+
+```bash
+./scripts/run.sh                                  # اجرای سرور
+# سپس در مرورگر: http://127.0.0.1:8000/admin      (یا / · /ui · /panel)
+```
+
+* **پنل مدیریت** (`/admin`): داشبورد زنده (مرورگر، صف، تأخیر، درخواست در جریان،
+  خطاهای اخیر)، **Playground** برای اجرای واقعی پرامپت از ابتدا تا انتهای زنجیره،
+  **تاریخچهٔ درخواست‌ها** (محدود، در حافظه، فیلترپذیر، قابل خروجی گرفتن)، کنترل
+  مرورگر (ping / تشخیص DOM / لغو / قطع اتصال)، بازرسی بدون‌اجرای ایمن‌ساز، فرم
+  **تنظیمات** زمان اجرا (اعمال بدون ری‌استارت و کپی `.env` معادل)، فهرست
+  خودآزمایی و قطعه‌کدهای آمادهٔ اتصال. دوزبانه (**فارسی/English**) با پشتیبانی
+  RTL، پوستهٔ تاریک/روشن و به‌روزرسانی خودکار قابل توقف. اگر
+  `AAB_REQUIRE_API_KEY=1` باشد، پنل هم همان کلید را می‌خواهد.
+* **رابط افزونه**: پاپ‌آپ نوار ابزار (وضعیت، **تست سریع** از داخل مرورگر،
+  تشخیص DOM، تنظیمات، اتصال مجدد/لغو) و **صفحهٔ تنظیمات کامل** (آدرس سرور، کلید
+  API، آستانه‌ها، capture، ورود/خروجی گرفتن و بازنشانی، مجوزهای فایرفاکس).
+  مقادیر اعتبارسنجی می‌شوند، در `chrome.storage.local` می‌مانند و اسکریپت محتوا
+  بی‌درنگ اعمالشان می‌کند.
+
+مرجع کامل: [`docs/WEBUI.fa.md`](docs/WEBUI.fa.md) · [English](docs/WEBUI.md).
+
+---
+
 ## اتصال Hermes / OpenClaw
 
 | تنظیم | مقدار |
@@ -256,6 +291,9 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 | `AAB_REQUIRE_API_KEY` | `0` | با `1` و `AAB_API_KEY` احراز هویت اجباری میشود |
 | `AAB_STREAM_CHUNK_CHARS` / `AAB_STREAM_CHUNK_DELAY_MS` | `32` / `12` | ریتم پخش جریان SSE |
 | `AAB_MOCK_BROWSER` | `0` | `1` = پاسخ ساختگی بدون مرورگر (فقط تست) |
+| `AAB_PANEL_ENABLED` | `1` | پنل مدیریت روی `/admin` (و `/`، `/ui`، `/panel`) |
+| `AAB_PANEL_REFRESH_MS` | `2000` | فاصلهٔ به‌روزرسانی خودکار پنل |
+| `AAB_HISTORY_SIZE` | `200` | تعداد درخواست‌های نگه‌داشته‌شده در تاریخچهٔ پنل (`0` = خاموش) |
 | `AAB_LOG_LEVEL` / `AAB_LOG_JSON` | `INFO` / `0` | سطح و قالب لاگ |
 
 ### افزونه — `extensions/shared/config.js`
@@ -290,7 +328,9 @@ __AAB__.diagnose();
 | `GET` | `/v1/models` | فهرست `arena-agent` و `arena-agent-direct` |
 | `GET` | `/v1/bridge/status` | وضعیت مرورگر، عمق صف، تأخیرها، خطاهای اخیر |
 | `GET` | `/healthz` · `/readyz` | سلامت · آمادگی (۲۰۰ وقتی مرورگر وصل است) |
-| `GET` | `/` | داشبورد وضعیت |
+| `GET` | `/` | داشبورد وضعیت (اگر پنل روشن باشد: خودِ پنل) |
+| `GET` | `/admin` · `/ui` · `/panel` | پنل مدیریت (HTML) |
+| `GET`/`POST` | `/admin/api/*` | API جیسون پنل: وضعیت، تنظیمات، تاریخچه، قواعد، sanitize، کنترل مرورگر، خودآزمایی |
 | `WS` | `/ws/browser` | اتصال افزونهٔ مرورگر — کامل: `ws://127.0.0.1:8000/ws/browser` |
 
 مستندات تعاملی: <http://127.0.0.1:8000/docs>
@@ -404,20 +444,27 @@ curl -s http://127.0.0.1:8000/v1/bridge/status  # وضعیت کامل
 ```
 arena-agent-bridge/
 ├── server/                      # پل FastAPI (فقط لوکالهاست)
+│   ├── admin.py                 # پنل /admin و API آن
+│   ├── webui.py + assets/       # پوستهٔ پنل و panel.css/panel.js
+│   ├── history.py               # تاریخچهٔ درون‌حافظه‌ای درخواست‌ها
+│   └── auth.py                  # بررسی مشترک Authorization
 ├── extensions/                  # یک کدبیس مشترک، دو بستهٔ مرورگر
-│   ├── shared/                  # config.js, content.js, background.js, inject.js, popup.*, icons/
+│   ├── shared/                  # config.js, content.js, background.js, inject.js,
+│   │                            # popup.*, options.*, settings.js, i18n.js, icons/
 │   ├── chrome/manifest.json     # service worker، هوک world:MAIN
 │   └── firefox/manifest.json    # event page، gecko id، مجوز opt-in
 ├── tests/                       # بدون نیاز به مرورگر
 │   ├── test_bridge.py           # تست سرتاسری سرور با مرورگر جعلی
+│   ├── test_admin.py            # تست HTML و API پنل مدیریت
 │   ├── test_build.py            # اعتبارسنجی بیلد هر دو بسته
-│   ├── test_extension_static.py # بررسی manifest/config/سطح API
+│   ├── test_extension_static.py # بررسی manifest/config/سطح رابط کاربری
 │   ├── extension_dom_test.mjs   # اجرای واقعی content.js در jsdom
+│   ├── webui_dom_test.mjs       # مجموعهٔ jsdom پنل مدیریت
 │   └── dev_ws_client.py         # مرورگر جعلی خط فرمان
 ├── scripts/                     # run.sh, demo.sh, build-extensions.py,
 │                                # firefox-dev.sh, make_icons.py
 ├── docs/                        # PROTOCOL, TROUBLESHOOTING, HERMES_OPENCLAW,
-│                                # FIREFOX — هر کدام + نسخهٔ فارسی .fa.md
+│                                # FIREFOX, WEBUI — هر کدام + نسخهٔ فارسی .fa.md
 ├── Makefile                     # make help
 └── .github/workflows/ci.yml     # CI: تستها + بیلد + web-ext lint
 ```
@@ -428,23 +475,25 @@ arena-agent-bridge/
 
 ```bash
 make install
-make test          # لایهٔ ۱ و ۳ پایتون + لایهٔ ۲ jsdom
-node tests/extension_dom_test.mjs
+make test          # لایهٔ ۱ و ۳ پایتون + هر دو مجموعهٔ jsdom
 npx web-ext lint --source-dir dist/firefox     # ۰ خطا / ۰ هشدار
 ```
 
 سه لایهٔ تست که هیچکدام به مرورگر یا اینترنت نیاز ندارند:
 
-1. **سرتاسری سرور** (`tests/test_bridge.py`) — مسیرهای واقعی HTTP و WebSocket با یک
-   مرورگر جعلی: صف، ساخت پرامپت، جریان SSE، نگاشت خطاها، ایمنساز، timeout و قطع اتصال.
-2. **خودکارسازی افزونه** (`tests/extension_dom_test.mjs`) — `content.js` واقعی داخل
-   jsdom روی یک صفحهٔ چت شبیهسازیشده: تایپ، کلیک Send، خواندن پاسخ در حال رشد
-   (markdown و بلوک کد)، هوک صفحه، تزریق در زمان اجرا، حالت DOM-only فایرفاکس،
-   کپچا/سلکتور/ارسالناموفق، لغو و حالت standby.
-3. **بستهبندی، مستندات و بررسی استاتیک** (`tests/test_build.py`,
-   `tests/test_extension_static.py` و `tests/test_docs.py`) — اعتبار manifestها، کامل
-   بودن بستهٔ ساختهشده، یکسان بودن نسخهها، فقط لوکالهاست، بدون `eval`، و سالم بودن
-   همهٔ لینکهای مستندات.
+1. **سرتاسری سرور و پنل** (`tests/test_bridge.py` ۴۴ تست و `tests/test_admin.py` ۴۵ تست؛
+   `tests/test_demo.py` هم `demo.sh` را اجرا می‌کند) — مسیرهای واقعی HTTP و WebSocket با یک
+   مرورگر جعلی: صف، ساخت پرامپت، جریان SSE، نگاشت خطاها، ایمن‌ساز، timeout و قطع اتصال،
+   به‌همراه کل سطح `/admin`: صفحه، تنظیمات، تاریخچه، کنترل مرورگر و خودآزمایی.
+2. **خودکارسازی و رابط افزونه** (`tests/extension_dom_test.mjs` با ۱۰۰ بررسی و
+   `tests/webui_dom_test.mjs` با ۶۰ بررسی) — `content.js` واقعی داخل jsdom روی یک صفحهٔ چت
+   شبیه‌سازی‌شده (تایپ، ارسال، ضبط پاسخ، هوک صفحه، تزریق در زمان اجرا، حالت DOM-only
+   فایرفاکس، مسیرهای خطا، لغو و standby)، رندر شدن پاپ‌آپ و صفحهٔ تنظیمات از مدل تنظیمات
+   مشترک، و اجرای پنل مدیریت روی یک API جعلی (نماها، i18n، Playground، تاریخچه، کنش‌ها).
+3. **بسته‌بندی، مستندات و بررسی استاتیک** (`tests/test_build.py` ۱۱ تست،
+   `tests/test_extension_static.py` ۲۲ تست و `tests/test_docs.py` ۳۸ تست) — اعتبار
+   manifestها، کامل بودن بستهٔ ساخته‌شده، یکسان بودن نسخه‌ها، فقط لوکال‌هاست، بدون `eval`،
+   خودبسنده بودن صفحه‌های رابط کاربری و سالم بودن همهٔ لینک‌های مستندات.
 
 ---
 

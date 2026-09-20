@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ArenaAgentBridge · settings</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f16;
+        --panel: #151c28;
+        --panel-2: #1b2331;
+        --border: #263143;
+        --text: #e6edf3;
+        --muted: #8b98a9;
+        --ok: #3fb950;
+        --bad: #f85149;
+        --warn: #d29922;
+        --accent: #22d3ee;
+        --accent-2: #a78bfa;
+        --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 0 0 60px;
+        background:
+          radial-gradient(900px 500px at 100% -10%, rgba(167, 139, 250, .12), transparent),
+          radial-gradient(800px 400px at -10% 0%, rgba(34, 211, 238, .10), transparent),
+          var(--bg);
+        color: var(--text);
+        font: 14px/1.6 system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif;
+      }
+      header {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 16px 24px; border-bottom: 1px solid var(--border);
+        position: sticky; top: 0; background: rgba(11, 15, 22, .92); backdrop-filter: blur(8px); z-index: 5;
+      }
+      header .logo {
+        width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #04121a; font-weight: 800;
+      }
+      header h1 { font-size: 16px; margin: 0; }
+      header .grow { flex: 1; }
+      main { max-width: 940px; margin: 0 auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+      .card h2 { font-size: 14px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px 20px; }
+      label.f { display: block; }
+      label.f .n { display: block; font-size: 13px; margin-bottom: 4px; }
+      label.f .h { display: block; color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+      .check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+      .check input { width: auto; }
+      input[type="text"], input[type="password"], input[type="number"], select, textarea {
+        width: 100%; font: inherit; color: var(--text); background: #060a11;
+        border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+      }
+      textarea { min-height: 130px; font: 12px var(--mono); resize: vertical; }
+      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .row.between { justify-content: space-between; }
+      .grow { flex: 1; min-width: 0; }
+      button, .btn {
+        font: inherit; cursor: pointer; color: var(--text); background: var(--panel-2);
+        border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px;
+        display: inline-flex; align-items: center; gap: 7px; text-decoration: none;
+      }
+      button:hover, .btn:hover { background: #202a3a; }
+      button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #05121a; border-color: transparent; font-weight: 650; }
+      button.danger { color: var(--bad); border-color: rgba(248, 81, 73, .45); }
+      .muted { color: var(--muted); }
+      .small { font-size: 12px; }
+      .mono { font-family: var(--mono); }
+      .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+      .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+      .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+      .pill.ok { color: var(--ok); } .pill.ok .dot { background: var(--ok); }
+      .pill.bad { color: var(--bad); } .pill.bad .dot { background: var(--bad); }
+      code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font: 12px var(--mono); }
+      footer.status { max-width: 940px; margin: 0 auto; padding: 0 24px; color: var(--muted); font-size: 12px; }
+      #toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 30; }
+      .toast { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 9px 12px; font-size: 12.5px; }
+      .toast.ok { border-left-color: var(--ok); }
+      .toast.bad { border-left-color: var(--bad); }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="logo">A</span>
+      <h1>ArenaAgentBridge <span class="muted small">v<span id="version"></span></span></h1>
+      <span class="grow"></span>
+      <span class="pill" id="server-pill"><span class="dot"></span><span id="server-pill-text">…</span></span>
+      <button id="open-panel">Panel</button>
+      <a class="btn" id="open-site" href="https://arena.ai/agent" target="_blank" rel="noreferrer">arena.ai</a>
+      <button id="lang-toggle">فارسی</button>
+    </header>
+
+    <main>
+      <div class="card">
+        <h2 data-i18n="set.intro">…</h2>
+        <div class="row">
+          <button class="primary" id="save-all" data-i18n="set.save">Save</button>
+          <button id="reset-all" class="danger" data-i18n="set.reset">Reset to defaults</button>
+          <button id="export-json" data-i18n="set.export">Export JSON</button>
+          <button id="import-json" data-i18n="set.import">Import JSON</button>
+          <span class="muted small" id="save-state"></span>
+        </div>
+      </div>
+
+      <div class="card" id="card-connection">
+        <h2 data-i18n="set.connection">Connection</h2>
+        <div class="grid" id="fields-connection"></div>
+        <div class="row" style="margin-top: 14px">
+          <label class="f grow">
+            <span class="n">API key</span>
+            <input type="password" id="api-key" placeholder="sk-arena" autocomplete="off" />
+            <span class="h">Only needed when the server runs with <code>AAB_REQUIRE_API_KEY=1</code> (used by the test button and the panel).</span>
+          </label>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <button id="test-connection">Test connection</button>
+          <button id="open-panel-2">Open the admin panel</button>
+          <span class="muted small" id="test-result"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set.automation">Automation &amp; timing</h2>
+        <div class="grid" id="fields-automation"></div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set.capture">Stream capture</h2>
+        <div class="grid" id="fields-capture"></div>
+      </div>
+
+      <div class="card" id="card-permissions" hidden>
+        <h2>Permissions</h2>
+        <div class="row between">
+          <span class="muted small" id="permission-text">…</span>
+          <button id="grant-permissions" class="primary">Grant permissions</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="set.advanced">Advanced (raw JSON)</h2>
+        <textarea id="raw-json" spellcheck="false"></textarea>
+        <div class="row" style="margin-top: 10px">
+          <button id="apply-raw" class="primary">Apply JSON</button>
+          <span class="muted small">Camera-ready for bug reports: this is exactly what is stored in <code>chrome.storage.local</code>.</span>
+        </div>
+      </div>
+
+      <footer class="status">
+        <span>Loopback only · the bridge never contacts a remote host · </span>
+        <a href="https://github.com/startify2647/ArenaAgentBridge" target="_blank" rel="noreferrer">docs &amp; source</a>
+      </footer>
+    </main>
+
+    <div id="toasts"></div>
+    <input type="file" id="import-file" accept="application/json" hidden />
+
+    <script src="config.js"></script>
+    <script src="i18n.js"></script>
+    <script src="settings.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>
