@@ -212,9 +212,18 @@ reconnects with a 10 s backoff.
   only after the previous `response`. Hold nothing in the extension.
 * Background tabs are throttled by Chrome, which is why the extension detects the
   end of an answer from DOM mutations and captured stream frames rather than a
-  timer alone.
+  timer alone - and why it finishes `ANSWER_SEND_MARGIN_MS` (15 s) *before* the
+  server's deadline, so a tab that only wakes once a minute still delivers.
+* A `response` that cannot be sent (socket down at that moment) is kept in a
+  small outbox in the extension and flushed when the socket is back.
+* If the extension socket drops mid-request, the server keeps the in-flight
+  request alive for `AAB_RECONNECT_GRACE` (8 s): a client that reconnects in
+  time gets the same `request` (same id) re-sent - an extension that is still
+  answering it ignores the duplicate, a fresh tab simply answers it. Only a tab
+  that stays gone surfaces as `browser_disconnected`.
 * If a second arena.ai tab connects and `AAB_SINGLE_CLIENT=1`, the server sends
-  `replaced` + close code `4000` to the older one.
+  `replaced` + close code `4000` to the older one; its in-flight request is
+  re-sent to the new tab the same way.
 
 ---
 
@@ -236,3 +245,15 @@ exposes no message element - `stop_reason: "stream_text"` and
 `meta.from_stream: true` tell a caller that this fallback was used. A prefix
 change therefore degrades speed, and the text fallback with it, but never turns a
 finished answer into a timeout.
+
+Capture cost model (1.4): the hook forwards traffic **only while a bridge request
+is running** - the content script marks `<html data-aab-capture>` for the
+duration of one turn, and `inject.js` checks that attribute before touching
+anything (a fetch that starts outside a turn is never tee'd). Each frame is
+parsed exactly once, on arrival, into a per-request aggregate; a capture tick
+reads a snapshot instead of re-parsing the buffer. If the site rotates its
+prefixes (`a0:` -> `b0:`/…), the first letter+digit prefix seen during the
+request is adopted automatically. When even the stream matches nothing, the
+content script falls back to *page-text growth*: it records the readable text of
+the chat region before typing and returns whatever appeared after our own prompt
+echo once it stops changing - slower, but redesign-proof.

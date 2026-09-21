@@ -91,6 +91,8 @@ class PendingRequest:
     created_at: float = field(default_factory=time.time)
     enqueued_at: float = field(default_factory=time.time)
     sent_at: Optional[float] = None
+    #: set when a reconnected tab received the request again
+    resent_at: Optional[float] = None
     client: Optional[BrowserClient] = None
     finished: bool = False
 
@@ -123,6 +125,8 @@ class BrowserBridge:
         self._running = False
         #: request-id -> future, for ``diagnose`` round-trips to the extension
         self._diagnostics: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        #: grace timers that fail orphaned requests when no tab reconnects
+        self._orphan_tasks: set = set()
 
         # stats
         self.started_at = time.time()
@@ -161,6 +165,9 @@ class BrowserBridge:
                     {"error": "server_shutdown", "response": None, "meta": {}}
                 )
         self._pending.clear()
+        for task in list(self._orphan_tasks):
+            task.cancel()
+        self._orphan_tasks.clear()
         for client in list(self.clients):
             with contextlib.suppress(Exception):
                 await client.ws.close(code=1001)
@@ -187,8 +194,13 @@ class BrowserBridge:
                 with contextlib.suppress(Exception):
                     await old.ws.close(code=4000)
                 self._remove_client(old)
+                self._orphan_pending_for(old)
         self.clients.append(client)
         self._client_ready.set()
+        # A tab that reconnected after a socket blink takes over the requests
+        # that were in flight on the dead connection (they are only failed
+        # once the grace window below expires).
+        await self._resend_orphans(client)
         logger.info("browser connected: %s v%s url=%s", client.client, client.version, client.url)
         return client
 
@@ -200,9 +212,92 @@ class BrowserBridge:
 
     async def disconnect(self, client: BrowserClient) -> None:
         self._remove_client(client)
-        self._fail_pending_for(client, code="browser_disconnected", status_code=502,
-                               message="the arena.ai tab/extension disconnected mid-request")
+        self._orphan_pending_for(client)
         logger.info("browser disconnected: %s", client.client)
+
+    # ------------------------------------------------------------------
+    # reconnect grace
+    # ------------------------------------------------------------------
+    def _orphan_pending_for(self, client: BrowserClient) -> None:
+        """Detach in-flight requests from a dropped client.
+
+        The tab usually reconnects within a few seconds (the extension retries
+        with backoff, and it queues answers it could not send), so the requests
+        get a short grace window instead of failing on the spot: a client that
+        reconnects in time has them re-sent, and only a tab that stays gone
+        surfaces as ``browser_disconnected``.
+        """
+
+        grace = max(0.0, float(self.settings.reconnect_grace_s))
+        for _request_id, pending in list(self._pending.items()):
+            if pending.finished or pending.client is not client:
+                continue
+            pending.client = None
+            if grace <= 0:
+                self._fail_orphan(pending)
+                continue
+            task = asyncio.get_running_loop().create_task(
+                self._expire_orphan_later(pending, time.time() + grace)
+            )
+            self._orphan_tasks.add(task)
+            task.add_done_callback(self._orphan_tasks.discard)
+
+    def _fail_orphan(self, pending: PendingRequest) -> None:
+        self._pending.pop(pending.id, None)
+        pending.finished = True
+        if not pending.future.done():
+            pending.future.set_result(
+                {
+                    "error": "browser_disconnected",
+                    "response": None,
+                    "meta": {
+                        "message": "the arena.ai tab/extension disconnected mid-request",
+                        "status_code": 502,
+                    },
+                }
+            )
+
+    async def _expire_orphan_later(self, pending: PendingRequest, deadline: float) -> None:
+        try:
+            await asyncio.sleep(max(0.05, deadline - time.time()))
+        except asyncio.CancelledError:
+            return
+        if pending.finished or pending.client is not None:
+            return  # answered, cancelled or already taken over by a new tab
+        if self._pending.get(pending.id) is not pending:
+            return
+        self._fail_orphan(pending)
+        logger.warning(
+            "request %s failed: the browser did not reconnect within the grace window",
+            pending.id[:8],
+        )
+
+    async def _resend_orphans(self, client: BrowserClient) -> None:
+        """Hand the requests of a dead connection to a (re)connecting client."""
+
+        orphans = [
+            pending
+            for pending in list(self._pending.values())
+            if not pending.finished and pending.client is None and pending.sent_at is not None
+        ]
+        for pending in orphans:
+            payload = BrowserRequest(
+                id=pending.id,
+                prompt=pending.prompt,
+                mode=pending.mode,
+                timeout=pending.timeout,
+            ).model_dump()
+            try:
+                await client.ws.send_json(payload)
+            except Exception:
+                self._fail_orphan(pending)
+                continue
+            pending.client = client
+            again = " again" if pending.resent_at else ""
+            pending.resent_at = time.time()
+            client.busy = True
+            client.state = "answering"
+            logger.info("request %s re-sent to the reconnected browser%s", pending.id[:8], again)
 
     def active_client(self) -> Optional[BrowserClient]:
         return self.clients[-1] if self.clients else None
@@ -294,18 +389,6 @@ class BrowserBridge:
             return
         if not future.done():
             future.set_result({key: value for key, value in payload.items() if key not in {"id", "type"}})
-
-    def _fail_pending_for(self, client: BrowserClient, code: str, status_code: int, message: str) -> None:
-        for request_id, pending in list(self._pending.items()):
-            if pending.client is not client:
-                continue
-            self._pending.pop(request_id, None)
-            pending.finished = True
-            if not pending.future.done():
-                pending.future.set_result(
-                    {"error": code, "response": None, "meta": {"message": message,
-                                                                "status_code": status_code}}
-                )
 
     # ------------------------------------------------------------------
     # control surface (admin panel)
@@ -566,6 +649,13 @@ class BrowserBridge:
             "response_timeout": (
                 "page_timeout",
                 "the page stopped producing output before a stable answer was reached",
+                504,
+            ),
+            "no_output": (
+                "page_timeout",
+                "the page produced no readable answer within the capture window - the "
+                "model may have answered but the selectors/stream no longer match the "
+                "site; run Diagnose DOM (popup) and update extensions/shared/config.js",
                 504,
             ),
             "site_idle": (

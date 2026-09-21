@@ -94,6 +94,9 @@
         '[class*="ChatMessage"]',
         'main article',
         'main li[class*="message"]',
+        'main [class*="turn"]',
+        'main [class*="bubble"]',
+        'main [class*="markdown"]',
       ],
       /**
        * The "how did I do?" poll the site shows in the composer after an
@@ -180,6 +183,14 @@
       /** Hard cap per request, mirrors AAB_REQUEST_TIMEOUT on the server. */
       MAX_WAIT_MS: 300000,
       /**
+       * Safety margin subtracted from the per-request budget: the decision
+       * (and the answer) must reach the server BEFORE its own deadline, because
+       * a throttled background tab may only wake once a minute.  Without the
+       * margin the model can answer, the tab delivers late, and the client
+       * still sees a timeout.
+       */
+      ANSWER_SEND_MARGIN_MS: 15000,
+      /**
        * The *site activity* watchdog: neither the DOM nor the captured stream
        * changed for this long while the request is running => the page stopped
        * working (hung generation, dropped socket, frozen tab).  A stoppage is
@@ -235,12 +246,22 @@
        * site ships a strict Content-Security-Policy.
        */
       INJECTION: 'manifest',
-      /** stream payload prefixes: 'a0:' main text, 'ag:' reasoning, 'ad:' data. */
+      /**
+       * The hook only forwards the site's traffic while a bridge request is
+       * running (the content script marks the document with
+       * `data-aab-capture`); idle browsing costs nothing.
+       */
+      CAPTURE_FLAG: 'data-aab-capture',
+      /** stream payload prefixes: 'a0:' main text, 'ag:' reasoning, 'ad:' data.
+       *  If the site rotates them (a1:/b0:/…), the first letter+digit prefix
+       *  seen during a request is adopted automatically. */
       PREFIX_MAIN: 'a0:',
       PREFIX_REASONING: 'ag:',
       PREFIX_DATA: 'ad:',
-      /** Ring buffer size for captured frames. */
-      MAX_FRAMES: 400,
+      /** Ring buffer size for captured frames (parsed once, on arrival). */
+      MAX_FRAMES: 200,
+      /** Frames kept while idle, for the popup's "Diagnose DOM" view. */
+      IDLE_TAIL_FRAMES: 16,
       /** Ignore streams not matching these (regex, as string). */
       URL_FILTER: 'arena\\.ai|/api/|/chat|completion|stream',
       /** Give the page hook this long to announce itself before trying again. */
@@ -275,7 +296,7 @@
     return base;
   }
 
-  CONFIG.version = '1.3.0';
+  CONFIG.version = '1.4.0';
   CONFIG.VERSION = CONFIG.version; // convenience alias used by the popup / background
 
   // Content scripts, the background worker and the popup all read

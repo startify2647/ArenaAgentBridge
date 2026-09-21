@@ -25,7 +25,7 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
-**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.3.0`
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.4.0`
 
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
@@ -62,9 +62,15 @@ touches cookies, and never stores credentials.
 3. The extension (connected over WebSocket) types the prompt into the chat box
    using the native setter + `input` event React expects, then clicks **Send**.
 4. It watches the DOM - plus the site's own streaming frames (`a0:`/`ag:`/`ad:`)
-   for exact start/stop detection - until the answer stops changing.
+   for exact start/stop detection - until the answer stops changing. The
+   observation is event-driven and incremental (each stream frame is parsed
+   once), and while no request runs the extension leaves the page's traffic
+   alone, so it stays light on the browser.
 5. The answer travels back to the server, is passed through the destructive-command
    sanitiser, and is returned as `chat.completion` JSON (or as an SSE stream).
+   Delivery is guaranteed across socket blinks: undelivered answers wait in a
+   small outbox, and the server re-sends in-flight requests to a tab that
+   reconnects within `AAB_RECONNECT_GRACE` seconds.
 
 Failure modes are explicit instead of silent: `captcha_required`,
 `login_required`, `dom_changed`, `page_timeout`, `browser_offline`, ... each maps
@@ -224,6 +230,7 @@ over the file. The important knobs:
 | `AAB_REQUIRE_API_KEY`   | `0`     | `1` + `AAB_API_KEY=…` to require a real Bearer token     |
 | `AAB_STREAM_CHUNK_CHARS` / `AAB_STREAM_CHUNK_DELAY_MS` | `32` / `12` | SSE replay pace |
 | `AAB_MOCK_BROWSER`      | `0`     | `1` = answer without a browser (testing only)           |
+| `AAB_RECONNECT_GRACE`   | `8`     | seconds to keep an in-flight request alive after the extension socket drops, so a reconnecting tab can finish it |
 | `AAB_LOG_LEVEL` / `AAB_LOG_JSON` | `INFO` / `0` | logging verbosity / format        |
 
 Extension: everything site-specific lives in
@@ -263,6 +270,7 @@ Key behaviour knobs in `config.js`:
 | `STALL_MS`          | `25000` | no growth but a Stop button is still there ⇒ return partial answer |
 | `NO_OUTPUT_MS`      | `60000` | nothing at all ⇒ `no_output` error |
 | `MAX_WAIT_MS`       | `300000`| hard per-request cap |
+| `ANSWER_SEND_MARGIN_MS` | `15000` | finish this much *before* the server's deadline, so a throttled background tab still delivers in time |
 | `RESET_BEFORE_REQUEST` | `false` | click "New chat" before every request (clean context, slower) |
 | `IDLE_STALL_MS`     | `45000` | neither the page nor the site stream changed this long ⇒ `site_idle` instead of hanging |
 | `PARTIAL_ON_TIMEOUT`| `true`  | hand over the partial answer when the deadline hits instead of a bare timeout |
@@ -270,12 +278,26 @@ Key behaviour knobs in `config.js`:
 | `KEEP_WORKING_WAIT_MS` | `4000` | how long to keep looking for that survey once the answer goes quiet |
 | `HEARTBEAT_MIN_MS`  | `5000`  | activity-driven keepalive: keeps the socket alive in a throttled background tab |
 | `capture.INJECTION` | `manifest` | how the page-world hook is injected (`manifest` / `runtime`) |
+| `capture.MAX_FRAMES`| `200`   | ring buffer of stream frames, each parsed once on arrival |
 | `SHOW_BADGE`        | `true`  | on-page status badge |
 
 `inject.js` only reads; it never sends anything, never touches `document.cookie`
-and never adds credentials to a request. If the `a0:`/`ag:`/`ad:` prefixes ever
-change, completion detection simply falls back to DOM-only (see
+and never adds credentials to a request. While no bridge request is running it
+does not touch the site's traffic at all (the content script marks the document
+with `data-aab-capture` for the duration of one request, and the hook forwards
+frames only while that flag is up). If the `a0:`/`ag:`/`ad:` prefixes ever
+change, the first letter+digit prefix seen during a request is adopted
+automatically, and completion detection can always fall back to the DOM (see
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md#3-emulated-stream-optional-capture-path)).
+
+Answers are found through three layers, in order: role/class selectors, the
+site's own stream text, and - new in 1.4 - a *growth fallback* that reads how
+the page's readable text grows and strips our own prompt echo, so a full site
+redesign degrades to "slower but still correct" instead of a timeout. Finished
+answers that could not be delivered (socket blinked at the wrong moment) are
+kept in a small outbox and flushed on reconnect; the server, in turn, keeps an
+in-flight request alive for `AAB_RECONNECT_GRACE` seconds and re-sends it to
+the tab that reconnects in time.
 
 ## API
 
@@ -414,7 +436,7 @@ make install          # .venv + server deps + jsdom
 make help             # list every task
 
 make run              # start the bridge server
-make test             # pytest (163) + jsdom (200 checks), no browser needed
+make test             # pytest (165) + jsdom (212 checks), no browser needed
 make lint             # ruff + node --check + manifest JSON
 make build            # dist/chrome + dist/firefox
 make firefox-lint     # Mozilla's validator on dist/firefox
@@ -422,12 +444,12 @@ make firefox-lint     # Mozilla's validator on dist/firefox
 
 Three test layers, none of which needs Chrome, Firefox or the network:
 
-1. **Server and panel end-to-end** (`tests/test_bridge.py` 44 tests,
+1. **Server and panel end-to-end** (`tests/test_bridge.py` 46 tests,
    `tests/test_admin.py` 45 tests; `tests/test_demo.py` runs `demo.sh`) - real
    HTTP + WebSocket code paths with a scripted fake browser (queueing, prompt
    assembly, SSE streaming, error mapping, sanitiser, timeouts, disconnects) plus
    the whole `/admin` surface: page, settings, history, browser control, self-check.
-2. **Extension automation and UI** (`tests/extension_dom_test.mjs`, 140 checks;
+2. **Extension automation and UI** (`tests/extension_dom_test.mjs`, 152 checks;
    `tests/webui_dom_test.mjs`, 60 checks) - the real `content.js` inside jsdom
    against a simulated chat page (typing, sending, capture, page-world hook,
    runtime injection, Firefox DOM-only fallback, failure paths, cancel, standby,

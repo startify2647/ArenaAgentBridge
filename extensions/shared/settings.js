@@ -77,6 +77,12 @@
       help_fa: 'معادل AAB_REQUEST_TIMEOUT در سرور.',
     },
     {
+      path: 'behavior.ANSWER_SEND_MARGIN_MS', group: 'automation', type: 'int', min: 0, max: 60000, step: 1000,
+      label: 'Deadline safety margin (ms)', label_fa: 'حاشیهٔ ایمنی مهلت (ms)',
+      help: 'Finish this much before the server deadline so a throttled tab still delivers.',
+      help_fa: 'این مقدار قبل از مهلت سرور کار تمام شود تا تبِ کندشده هم پاسخ را برساند.',
+    },
+    {
       path: 'behavior.INPUT_WAIT_MS', group: 'automation', type: 'int', min: 2000, max: 120000, step: 1000,
       label: 'Input wait (ms)', label_fa: 'انتظار برای کادر ورودی (ms)',
       help: 'How long to wait for the chat box after navigation.',

@@ -484,9 +484,10 @@ async def test_response_for_unknown_request_is_ignored(api):
 
 
 async def test_disconnect_fails_the_inflight_request(api):
-    """Pulling the browser tab out from under a request ends it immediately."""
+    """Pulling the browser tab out from under a request ends it (after grace)."""
     app, _ = api
     bridge = app.state.bridge
+    app.state.settings.reconnect_grace_s = 0.05  # do not wait the full window here
     ws = FakeWebSocket()
     browser = await bridge.connect(ws, {"client": "tab"})
 
@@ -499,4 +500,62 @@ async def test_disconnect_fails_the_inflight_request(api):
         await bridge.submit("prompt", "agent", timeout=10)
     assert excinfo.value.code == "browser_disconnected"
     assert excinfo.value.status_code == 502
+    await task
+
+
+async def test_reconnect_within_grace_resends_and_answers(api):
+    """A tab that reconnects within the grace window takes over the request.
+
+    The extension reconnects with backoff and queues answers it could not
+    deliver, so a socket blink must not burn the whole request: the in-flight
+    prompt is re-sent to the new connection and its answer resolves the
+    original submit().
+    """
+    app, _ = api
+    bridge = app.state.bridge
+    app.state.settings.reconnect_grace_s = 5.0
+    first_ws = FakeWebSocket()
+    first = await bridge.connect(first_ws, {"client": "tab-one"})
+
+    async def answer_on_reconnect():
+        await asyncio.sleep(0.05)
+        await bridge.disconnect(first)
+        await asyncio.sleep(0.05)
+        second_ws = FakeWebSocket()
+        second = await bridge.connect(second_ws, {"client": "tab-two"})
+        # the request must have been re-sent to the new connection
+        resent = [m for m in second_ws.sent if m.get("type") == "request"]
+        assert resent, f"the request was not re-sent: {second_ws.sent}"
+        await bridge.handle_message(
+            second,
+            {"type": "response", "id": resent[0]["id"], "response": "answer after reconnect",
+             "error": None, "meta": {"duration_ms": 5}},
+        )
+
+    task = asyncio.create_task(answer_on_reconnect())
+    result = await bridge.submit("prompt", "agent", timeout=10)
+    await task
+    assert result["response"] == "answer after reconnect"
+    # the dead connection must not keep the request listed as pending
+    assert bridge.stats()["server"]["pending_requests"] == 0
+
+
+async def test_no_reconnect_fails_after_the_grace_window(api):
+    """A tab that never comes back surfaces as browser_disconnected."""
+    app, _ = api
+    bridge = app.state.bridge
+    app.state.settings.reconnect_grace_s = 0.2
+    ws = FakeWebSocket()
+    browser = await bridge.connect(ws, {"client": "tab"})
+
+    async def pull_the_plug():
+        await asyncio.sleep(0.05)
+        await bridge.disconnect(browser)
+
+    task = asyncio.create_task(pull_the_plug())
+    started = time.time()
+    with pytest.raises(BridgeError) as excinfo:
+        await bridge.submit("prompt", "agent", timeout=10)
+    assert excinfo.value.code == "browser_disconnected"
+    assert time.time() - started < 5  # it did not wait for the HTTP timeout
     await task
