@@ -1,14 +1,21 @@
 /**
  * ArenaAgentBridge - extensions/shared/inject.js
  * ---------------------------------------------------------------------------
+
  * Runs in the PAGE world (MAIN world) because content scripts cannot touch the
  * page's `window.WebSocket`.
  *
  * It only *observes* the site's own network activity - it does not send
- * anything anywhere. Every frame that looks like an SSE/streaming payload is
- * forwarded to the content script with `window.postMessage`, which uses it to
- * detect the exact moment a generation starts and ends (much faster and more
- * reliable than guessing from the DOM alone).
+ * anything anywhere.  While a bridge request is in flight (the content script
+ * marks the document with `data-aab-capture`) every frame that looks like an
+ * SSE/streaming payload is forwarded to the content script with
+ * `window.postMessage`, which uses it to detect the exact moment a generation
+ * starts and ends (much faster and more reliable than guessing from the DOM
+ * alone).
+ *
+ * While no request is running the hook stays silent: the site's traffic is not
+ * duplicated, parsed or forwarded, so normal browsing with the extension
+ * installed costs (almost) nothing.
  */
 (function () {
   'use strict';
@@ -17,6 +24,7 @@
   window.__AAB_INJECTED__ = true;
 
   const CHANNEL = 'arena-agent-bridge';
+  const CAPTURE_FLAG = 'data-aab-capture';
   const NativeWebSocket = window.WebSocket;
   const NativeEventSource = window.EventSource;
 
@@ -27,6 +35,18 @@
       window.postMessage({ source: CHANNEL, kind, ...payload }, window.location.origin);
     } catch (_) {
       /* ignore cross-origin / cloning errors */
+    }
+  }
+
+  /**
+   * The content script sets <html data-aab-capture> for the duration of one
+   * bridge request.  Checking an attribute is free - no listener, no polling.
+   */
+  function captureWanted() {
+    try {
+      return document.documentElement.hasAttribute(CAPTURE_FLAG);
+    } catch (_) {
+      return true; // cannot tell: keep the old always-on behaviour
     }
   }
 
@@ -53,22 +73,22 @@
     try {
       ws.addEventListener('open', () => {
         interesting = looksInteresting(ws.url);
-        if (interesting) post('ws-open', { id, url: ws.url, label });
+        if (interesting && captureWanted()) post('ws-open', { id, url: ws.url, label });
       });
 
       ws.addEventListener('message', (event) => {
-        if (!interesting) return;
+        if (!interesting || !captureWanted()) return;
         const data = typeof event.data === 'string' ? event.data : null;
         if (!data) return;
         post('ws-message', { id, url: ws.url, label, data: data.slice(0, 20000) });
       });
 
       ws.addEventListener('close', () => {
-        if (interesting) post('ws-close', { id, url: ws.url, label });
+        if (interesting && captureWanted()) post('ws-close', { id, url: ws.url, label });
       });
 
       ws.addEventListener('error', () => {
-        if (interesting) post('ws-error', { id, url: ws.url, label });
+        if (interesting && captureWanted()) post('ws-error', { id, url: ws.url, label });
       });
     } catch (_) {
       /* a page could freeze/replace the object; ignore */
@@ -96,6 +116,7 @@
       const id = ++counter;
       try {
         source.addEventListener('message', (event) => {
+          if (!captureWanted()) return;
           if (typeof event.data === 'string' && looksInteresting(url)) {
             post('ws-message', { id, url: String(url), label: 'EventSource', data: event.data });
           }
@@ -112,19 +133,29 @@
   // ---------------------------------------------------------------------
   // fetch hook - the site may stream with fetch + ReadableStream, in which
   // case we tap the body without touching the response the page receives.
+  // The page's branch of the tee()d stream is swapped into the original
+  // response object (a fresh `new Response(...)` would lose `url`, `type`,
+  // `redirected` and header normalisation, which real apps do depend on).
   // ---------------------------------------------------------------------
   const nativeFetch = window.fetch;
   if (typeof nativeFetch === 'function') {
     window.fetch = function patchedFetch(input, init) {
       const url = typeof input === 'string' ? input : input && input.url;
       const promise = nativeFetch.apply(this, arguments);
-      if (!looksInteresting(url)) return promise;
+      if (!looksInteresting(url) || !captureWanted()) return promise;
 
       const id = ++counter;
       return promise.then((response) => {
         try {
           if (!response || !response.body || typeof response.body.tee !== 'function') return response;
+          if (!captureWanted()) return response; // the request ended meanwhile
           const [forPage, forUs] = response.body.tee();
+          Object.defineProperty(response, 'body', {
+            value: forPage,
+            configurable: true,
+            enumerable: true,
+            writable: false,
+          });
           const reader = forUs.getReader();
           const decoder = new TextDecoder();
           post('ws-open', { id, url: String(url), label: 'fetch' });
@@ -134,6 +165,15 @@
               .then(({ done, value }) => {
                 if (done) {
                   post('ws-close', { id, url: String(url), label: 'fetch' });
+                  return;
+                }
+                if (!captureWanted()) {
+                  // nobody is listening anymore: stop our copy of the stream
+                  try {
+                    reader.cancel().catch(() => {});
+                  } catch (_) {
+                    /* ignore */
+                  }
                   return;
                 }
                 post('ws-message', {
@@ -146,11 +186,7 @@
               })
               .catch(() => post('ws-close', { id, url: String(url), label: 'fetch' }));
           })();
-          return new Response(forPage, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers,
-          });
+          return response;
         } catch (_) {
           return response;
         }

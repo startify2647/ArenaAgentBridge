@@ -95,8 +95,9 @@ class FakeSite {
     const doc = this.window.document;
     const user = doc.createElement('div');
     if (this.options.hideMessages) {
-      // markup changed: no role attributes at all (what a redesign looks like)
-      user.className = 'turn turn-user';
+      // markup changed: no role attributes and hashed, meaningless class names
+      // (what a real redesign looks like - nothing matches a selector)
+      user.className = 'v2_row v2_you';
       user.textContent = prompt;
     } else {
       user.setAttribute('data-message-author-role', 'user');
@@ -105,7 +106,7 @@ class FakeSite {
     doc.getElementById('chat').appendChild(user);
 
     const assistant = doc.createElement('div');
-    if (this.options.hideMessages) assistant.className = 'turn turn-bot';
+    if (this.options.hideMessages) assistant.className = 'v2_row v2_ai';
     else assistant.setAttribute('data-message-author-role', 'assistant');
     doc.getElementById('chat').appendChild(assistant);
 
@@ -765,12 +766,22 @@ async function main() {
     check('hook reported itself ready', h.window.__AAB__.capture.hookReady === true);
     check('hook state is exposed for the popup', Boolean(h.window.__AAB__.pageHook));
 
-    // the *page* opens its own socket; the hook should relay its frames
+    // while idle the hook must stay silent (that is what keeps the extension
+    // cheap for normal browsing)
     const pageSocket = new h.window.WebSocket('https://arena.ai/api/agent/stream');
+    pageSocket.emit('open', {});
+    pageSocket.emit('message', { data: 'a0:idle traffic must not be tapped' });
+    await sleep(50);
+    check('idle traffic is not captured', h.window.__AAB__.capture.frames.length === 0,
+      JSON.stringify(h.window.__AAB__.capture.frames));
+
+    // during a bridge request the hook forwards the site's own frames
+    h.window.document.documentElement.setAttribute('data-aab-capture', '1');
     pageSocket.emit('open', {});
     pageSocket.emit('message', { data: 'a0:hello from the page stream' });
     pageSocket.emit('message', { data: 'ag:thinking' });
     await sleep(50);
+    h.window.document.documentElement.removeAttribute('data-aab-capture');
 
     const frames = h.window.__AAB__.capture.frames;
     check('frames were captured from the page socket', frames.length >= 2, `${frames.length} frames`);
@@ -1194,6 +1205,63 @@ async function main() {
     check('the delta shape is decoded', text.includes('delta shape'), JSON.stringify(text));
     check('the array shape is decoded', text.includes('array shape'), JSON.stringify(text));
     check('plain text frames are kept', text.includes('plain text without json'), JSON.stringify(text));
+    h.close();
+  });
+
+  await test('growth fallback: a fully redesigned page still yields the answer', async () => {
+    // no role attributes, hashed class names, no stream frames at all - the
+    // old code would time out here while the answer is visibly on screen
+    const h = await createHarness({ site: { hideMessages: true, survey: false } });
+    const reply = await request(h, { prompt: 'answer me via the growth fallback path' });
+    check('the answer is recovered from the page text',
+      (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check('the prompt echo is not part of the answer',
+      !(reply.response || '').includes('growth fallback path'), JSON.stringify(reply.response));
+    check('the turn completed on its own',
+      ['stable', 'stalled', 'timeout_partial'].includes(reply.meta.stop_reason), JSON.stringify(reply.meta.stop_reason));
+    check('the capture flag is cleared after the turn',
+      h.window.document.documentElement.getAttribute('data-aab-capture') !== '1');
+    h.close();
+  });
+
+  await test('a rotated stream prefix is adopted automatically', async () => {
+    const h = await createHarness({ site: { hideMessages: true, keepStop: true, survey: false },
+      config: { behavior: { ...FAST_CONFIG.behavior, IDLE_STALL_MS: 30000, NO_OUTPUT_MS: 4000 } } });
+    h.site.streamFrames({
+      frames: [
+        'b0:{"text":"prefix rotated "}',
+        'b0:{"text":"but still parsed"}',
+      ],
+    });
+    const reply = await request(h, { prompt: 'rotated prefixes' });
+    check('the rotated prefix text is used',
+      (reply.response || '').includes('prefix rotated') && (reply.response || '').includes('but still parsed'),
+      JSON.stringify(reply.response));
+    h.close();
+  });
+
+  await test('a finished answer survives a socket blink (outbox + flush)', async () => {
+    const h = await createHarness({ site: { chunkDelay: 25 } });
+    const first = h.socket;
+    const promise = request(h, { prompt: 'queue this answer for me please', mode: 'direct' });
+    await sleep(60); // the request is in flight
+    check('capture is announced to the page hook while answering',
+      h.window.document.documentElement.getAttribute('data-aab-capture') === '1');
+
+    first.close(1006); // the connection dies mid-request
+    await sleep(700); // the model finishes; the answer must be queued, not lost
+    check('nothing could be sent on the dead socket', !h.ws.sent.some((m) => m.type === 'response'));
+    check('the answer waits in the outbox', h.window.__AAB__.transport.outbox.length === 1,
+      JSON.stringify(h.window.__AAB__.transport.outbox.length));
+
+    h.window.__AAB__.transport.connect(); // the extension reconnects
+    const reply = await promise;
+    check('the queued answer arrived after the reconnect',
+      (reply.response || '').includes('Hello **world**'), JSON.stringify(reply));
+    check('the outbox is empty again', h.window.__AAB__.transport.outbox.length === 0,
+      JSON.stringify(h.window.__AAB__.transport.outbox.length));
+    check('the capture flag is cleared after the turn',
+      h.window.document.documentElement.getAttribute('data-aab-capture') !== '1');
     h.close();
   });
 

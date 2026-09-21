@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ArenaAgentBridge",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Exposes the Arena.ai web UI to a local OpenAI-compatible bridge (ArenaAgentBridge) - status popup, settings page and a local admin panel. Personal/experimental use only.",
   "browser_specific_settings": {
     "gecko": {

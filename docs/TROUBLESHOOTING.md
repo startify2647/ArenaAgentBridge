@@ -129,6 +129,16 @@ Order of checks:
   a page (and stream) that stops changing for `IDLE_STALL_MS` produces
   `site_idle` straight away, and a stream that goes silent with a Stop button
   still showing produces a partial answer after `STALL_MS`.
+* **The model answered but you still got a timeout** - three layers protect this
+  now, in this order: (1) the extension finishes `ANSWER_SEND_MARGIN_MS` (15 s)
+  before the server's deadline so a throttled background tab still delivers;
+  (2) an answer that cannot be delivered immediately waits in the extension's
+  outbox and is flushed on reconnect; (3) the server keeps an in-flight request
+  alive for `AAB_RECONNECT_GRACE` (8 s) and re-sends it to the tab that
+  reconnects in time. If you still see it, run *Diagnose DOM* - the page may
+  have stopped matching every selector and stream prefix; 1.4 also has a
+  page-text growth fallback for exactly that case, so a `page_timeout` with an
+  answer visible on screen is worth a bug report.
 
 ## Streaming looks like one big chunk
 
@@ -165,6 +175,11 @@ single request. For finer control, write your own rules and point
 ## Everything is slow
 
 * The bridge is **single-flight**: latency is the page's latency, plus queue wait.
+* 1.4 removed the classic extension hot spots: while no request runs the page
+  hook does not touch the site's traffic at all, stream frames are parsed once
+  (not re-parsed on every poll), and button matching no longer forces layout.
+  If the browser still feels heavy with the extension installed, check that the
+  loaded build is actually 1.4+ (`chrome://extensions` → details).
 * `behavior.SHOW_BADGE = false` and `debug.VERBOSE = false` shave off a little
   overhead.
 * Prefer `mode: "direct"` (or the `arena-agent-direct` model) for short prompts -

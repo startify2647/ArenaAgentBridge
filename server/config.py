@@ -166,6 +166,11 @@ class Settings:
     single_client: bool = True
     heartbeat_interval: float = 20.0
     client_hello_timeout: float = 30.0
+    #: When the extension socket drops mid-request, keep the in-flight request
+    #: alive this long (seconds): a tab that reconnects in time gets the request
+    #: re-sent (and the extension queues answers it could not deliver), so a
+    #: brief socket blink does not burn the whole request.  0 = fail instantly.
+    reconnect_grace_s: float = 8.0
 
     # --- admin panel / history --------------------------------------------
     #: Serve the web UI on ``/`` (and ``/admin``, ``/ui``, ``/panel``).
@@ -179,7 +184,7 @@ class Settings:
     log_level: str = "INFO"
     log_json: bool = False
     stats_window: int = 50
-    version: str = "1.3.0"
+    version: str = "1.4.0"
 
     model_ids: List[str] = field(default_factory=list)
 
@@ -223,6 +228,7 @@ class Settings:
             single_client=_env_bool("SINGLE_CLIENT", d.single_client),
             heartbeat_interval=_env_float("HEARTBEAT_INTERVAL", d.heartbeat_interval),
             client_hello_timeout=_env_float("CLIENT_HELLO_TIMEOUT", d.client_hello_timeout),
+            reconnect_grace_s=max(0.0, _env_float("RECONNECT_GRACE", d.reconnect_grace_s)),
             log_level=(_env("LOG_LEVEL", d.log_level) or d.log_level).upper(),
             log_json=_env_bool("LOG_JSON", d.log_json),
             stats_window=_env_int("STATS_WINDOW", d.stats_window),
@@ -246,6 +252,8 @@ class Settings:
             self.queue_max_size = 1
         if self.heartbeat_interval < 5:
             self.heartbeat_interval = 5.0
+        if self.reconnect_grace_s < 0:
+            self.reconnect_grace_s = 0.0
         if self.min_request_timeout < 1:
             self.min_request_timeout = 1.0
         if self.max_request_timeout < self.min_request_timeout:

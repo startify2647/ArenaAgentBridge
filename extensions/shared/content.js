@@ -51,11 +51,22 @@
     return text.length > limit ? `${text.slice(0, limit)}…(${text.length} chars)` : text;
   }
 
+  const escapeRegExp = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
   function isVisible(el) {
     if (!el || !el.isConnected) return false;
     if (el.offsetWidth === 0 && el.offsetHeight === 0) {
       const rect = el.getBoundingClientRect && el.getBoundingClientRect();
       if (!rect || rect.width === 0 || rect.height === 0) return false;
+    }
+    // checkVisibility() is the cheap, engine-side test (no style recalc);
+    // the manual fallback keeps very old browsers - and jsdom - working.
+    if (typeof el.checkVisibility === 'function') {
+      try {
+        return el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+      } catch (_) {
+        /* fall through to the computed style */
+      }
     }
     const style = window.getComputedStyle(el);
     if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
@@ -68,7 +79,9 @@
 
   function matchesText(el, needles) {
     if (!needles || !needles.length) return true;
-    const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+    // textContent (not innerText): innerText forces layout, and this runs on
+    // every button of the page several times per capture tick.
+    const text = String(el.getAttribute('aria-label') || el.textContent || '')
       .trim()
       .toLowerCase()
       .slice(0, 200);
@@ -87,9 +100,10 @@
     }
     for (const el of nodes) {
       if (spec.tag && el.tagName.toLowerCase() !== String(spec.tag).toLowerCase()) continue;
+      // cheap text match first, visibility (style/layout) only for survivors
+      if (!matchesText(el, spec.text)) continue;
       if (visible && !isVisible(el)) continue;
       if (enabled && !isEnabled(el)) continue;
-      if (!matchesText(el, spec.text)) continue;
       return el;
     }
     return null;
@@ -148,6 +162,17 @@
   // -------------------------------------------------------------------------
   function shouldIgnore(el) {
     for (const css of (CFG.selectors && CFG.selectors.ignoreInside) || []) {
+      try {
+        if (el.matches && el.matches(css)) return true;
+      } catch (_) {
+        /* bad selector in a runtime override */
+      }
+    }
+    return false;
+  }
+
+  function matchesAny(el, list) {
+    for (const css of list || []) {
       try {
         if (el.matches && el.matches(css)) return true;
       } catch (_) {
@@ -249,8 +274,12 @@
       case 'div':
       case 'section':
       case 'article':
-      case 'main':
-        return children().trim() ? `${children()}\n\n` : '';
+      case 'main': {
+        // children() walks the whole subtree: compute it once, never twice.
+        const text = children();
+        const trimmed = text.trim();
+        return trimmed ? `${trimmed}\n\n` : '';
+      }
       case 'span':
       case 'label':
       case 'td':
@@ -315,6 +344,16 @@
 
   // -------------------------------------------------------------------------
   // Stream capture (fed by inject.js in the page world)
+  //
+  // Cost model: every frame is parsed exactly once, when it arrives, and the
+  // per-request aggregate is updated incrementally.  A capture tick therefore
+  // reads a snapshot instead of re-parsing the whole frame buffer - the old
+  // behaviour was O(frames x text) per tick and made long answers burn CPU on
+  // every poll, which the page visibly felt as lag.
+  //
+  // While no bridge request is in flight the page hook stops forwarding the
+  // site's traffic entirely (see the `data-aab-capture` flag in inject.js), and
+  // only a short diagnostic tail of frames is kept in memory.
   // -------------------------------------------------------------------------
   const StreamCapture = {
     frames: [],
@@ -325,6 +364,10 @@
     hookReady: false,
     hookReadyAt: 0,
     hookSource: null,
+    /** aggregate of the request currently in flight (null while idle) */
+    active: null,
+    /** DOM attribute the page-world hook checks before forwarding traffic */
+    FLAG: (CFG.capture && CFG.capture.CAPTURE_FLAG) || 'data-aab-capture',
 
     install() {
       if (this.installed) return;
@@ -360,36 +403,30 @@
       return this.urlPattern ? this.urlPattern.test(String(url)) : true;
     },
 
-    push(url, data, label) {
-      if (!this.isRelevant(url)) return;
-      const now = Date.now();
-      this.frames.push({ at: now, url: String(url), label: label || '', data: String(data || '').slice(0, 20000) });
-      const max = (CFG.capture && CFG.capture.MAX_FRAMES) || 400;
-      if (this.frames.length > max) this.frames.splice(0, this.frames.length - max);
-      this.lastActivityAt = now;
-      this.lastRelevantAt = now;
-      Signal.notify();
+    /** True while a bridge request is in flight (the page hook asks the same). */
+    capturing() {
+      return Boolean(this.active);
     },
 
-    mark() {
-      return { at: Date.now(), index: this.frames.length };
-    },
-
-    framesSince(mark) {
-      if (!mark) return this.frames.slice(-20);
-      return this.frames.slice(Math.min(mark.index, this.frames.length)).filter((f) => f.at >= mark.at - 500);
+    setFlag(on) {
+      try {
+        const root = document.documentElement;
+        if (!root) return;
+        if (on) root.setAttribute(this.FLAG, '1');
+        else root.removeAttribute(this.FLAG);
+      } catch (_) {
+        /* not a DOM environment */
+      }
     },
 
     /**
-     * Pull the answer text out of one captured frame line.
+     * Pull the answer text out of one frame body (without its `a0:` prefix).
      *
-     * The site sends one text chunk per frame (`a0:…`); the payload is either
-     * plain text or a small JSON object.  We do not depend on the exact schema:
-     * known shapes are unwrapped, anything else is used verbatim.
+     * The site sends one text chunk per frame; the payload is either plain text
+     * or a small JSON object.  We do not depend on the exact schema: known
+     * shapes are unwrapped, anything else is used verbatim.
      */
-    frameText(line, prefixMain) {
-      const body = String(line || '').replace(/^data:\s*/, '').trim();
-      if (!body || !body.startsWith(prefixMain)) return '';
+    frameText(body, prefixMain) {
       let payload = body.slice(prefixMain.length).trim();
       if (!payload) return '';
       if (payload.charAt(0) === '{' || payload.charAt(0) === '[') {
@@ -404,7 +441,164 @@
     },
 
     /**
-     * Aggregate stats for the frames belonging to one request.
+     * Parse one captured frame once.  The result is cached on the frame, so
+     * even a re-parse (only possible after a prefix re-lock) is one pass.
+     */
+    parseFrame(frame, agg) {
+      const capture = CFG.capture || {};
+      let prefixMain = (agg && agg.prefixMain) || capture.PREFIX_MAIN || 'a0:';
+      if (frame.parsed && frame.parsed.prefix === prefixMain) return frame.parsed.result;
+      const prefixReason = capture.PREFIX_REASONING || 'ag:';
+      const prefixData = capture.PREFIX_DATA || 'ad:';
+      const lines = String(frame.data || '').split(/\r?\n/);
+
+      // The site may rotate its stream prefixes (`a0:` -> `a1:`/`b0:`/…).
+      // While nothing matched the configured main prefix yet, adopt the first
+      // letter+digit prefix that carries a recognisable text payload.
+      if (agg && !agg.prefixLocked) {
+        let hasConfigured = false;
+        let candidate = '';
+        for (const line of lines) {
+          const body = line.replace(/^data:\s*/, '').trim();
+          if (!body) continue;
+          if (body.startsWith(prefixMain)) {
+            hasConfigured = true;
+            break;
+          }
+          const found = /^([a-z]\d):/i.exec(body);
+          if (found && !body.startsWith(prefixReason) && !body.startsWith(prefixData) && !candidate) {
+            const rest = body.slice(found[0].length).trim();
+            if (rest.charAt(0) === '{' || rest.charAt(0) === '[') {
+              try {
+                if (firstTextField(JSON.parse(rest))) candidate = found[1] + ':';
+              } catch (_) {
+                /* not a JSON text frame - not a candidate either */
+              }
+            } else if (rest) {
+              candidate = found[1] + ':';
+            }
+          }
+        }
+        if (hasConfigured || candidate) {
+          if (!hasConfigured && candidate) {
+            agg.prefixMain = candidate;
+            prefixMain = candidate;
+          }
+          agg.prefixLocked = true;
+        }
+      }
+
+      let mainChars = 0;
+      let reasoningChars = 0;
+      let text = '';
+      let sawDone = false;
+      let sawError = false;
+      for (const line of lines) {
+        const body = line.replace(/^data:\s*/, '').trim();
+        if (!body) continue;
+        if (body === '[DONE]' || /"type"\s*:\s*"done"|"finish_reason"\s*:\s*"(stop|end_turn)"/.test(body)) {
+          sawDone = true;
+        }
+        if (/"error\s*":/.test(body)) sawError = true;
+        if (body.startsWith(prefixMain)) {
+          mainChars += body.length - prefixMain.length;
+          const piece = this.frameText(body, prefixMain);
+          if (piece) {
+            // A chunk can be a rewrite (the site re-sends the whole text) or an
+            // append; `startsWith` tells them apart without the DOM.
+            if (text && piece.startsWith(text)) text = piece;
+            else text += piece;
+          }
+        } else if (body.startsWith(prefixReason)) {
+          reasoningChars += body.length - prefixReason.length;
+        }
+      }
+      const result = { mainChars, reasoningChars, text, sawDone, sawError };
+      frame.parsed = { prefix: prefixMain, result };
+      return result;
+    },
+
+    /** Fold one frame into the running request aggregate. */
+    absorb(frame, agg) {
+      const parsed = this.parseFrame(frame, agg);
+      const limit = (CFG.capture && CFG.capture.MAX_TEXT_CHARS) || 200000;
+      agg.frames += 1;
+      agg.mainChars += parsed.mainChars;
+      agg.reasoningChars += parsed.reasoningChars;
+      if (!agg.firstAt) agg.firstAt = frame.at;
+      agg.lastAt = frame.at;
+      if (parsed.sawDone) agg.sawDone = true;
+      if (parsed.sawError) agg.sawError = true;
+      if (parsed.text) {
+        if (agg.text.length < limit) {
+          if (agg.text && parsed.text.startsWith(agg.text)) agg.text = parsed.text;
+          else agg.text += parsed.text;
+        } else {
+          agg.textTruncated = true;
+        }
+      }
+    },
+
+    push(url, data, label) {
+      if (!this.isRelevant(url)) return;
+      const now = Date.now();
+      const frame = { at: now, url: String(url), label: label || '', data: String(data || '').slice(0, 20000) };
+      const agg = this.active;
+      if (agg) this.absorb(frame, agg);
+      this.frames.push(frame);
+      const max = agg
+        ? (CFG.capture && CFG.capture.MAX_FRAMES) || 200
+        : (CFG.capture && CFG.capture.IDLE_TAIL_FRAMES) || 16;
+      if (this.frames.length > max) this.frames.splice(0, this.frames.length - max);
+      this.lastActivityAt = now;
+      this.lastRelevantAt = now;
+      Signal.notify();
+    },
+
+    /** Start the per-request aggregate; returns the mark for this request. */
+    beginRequest() {
+      const capture = CFG.capture || {};
+      const now = Date.now();
+      const agg = {
+        beganAt: now,
+        prefixMain: capture.PREFIX_MAIN || 'a0:',
+        prefixLocked: false,
+        frames: 0,
+        mainChars: 0,
+        reasoningChars: 0,
+        text: '',
+        textTruncated: false,
+        firstAt: 0,
+        lastAt: 0,
+        sawDone: false,
+        sawError: false,
+      };
+      // Absorb frames that arrived just before the request (submit slop), the
+      // way the old `framesSince(mark)` filter did with its 500 ms window.
+      for (const frame of this.frames) {
+        if (frame.at < now - 500) continue;
+        this.absorb(frame, agg);
+      }
+      this.active = agg;
+      this.setFlag(true);
+      return { at: now, index: this.frames.length };
+    },
+
+    /** End the request: stop the page hook, keep only a diagnostic tail. */
+    endRequest() {
+      this.active = null;
+      this.setFlag(false);
+      const tail = (CFG.capture && CFG.capture.IDLE_TAIL_FRAMES) || 16;
+      if (this.frames.length > tail) this.frames.splice(0, this.frames.length - tail);
+    },
+
+    mark() {
+      return { at: Date.now(), index: this.frames.length };
+    },
+
+    /**
+     * Snapshot of the stream belonging to the request in flight (or, when
+     * idle, of the retained diagnostic tail).
      *
      * `text` is the answer as the site's own stream reported it.  It is the
      * fallback when the DOM does not expose the answer element (markup change,
@@ -412,59 +606,47 @@
      * visibly streams in the page.
      */
     summary(mark) {
-      const prefixMain = (CFG.capture && CFG.capture.PREFIX_MAIN) || 'a0:';
-      const prefixReason = (CFG.capture && CFG.capture.PREFIX_REASONING) || 'ag:';
-      const frames = this.framesSince(mark);
-      const limit = (CFG.capture && CFG.capture.MAX_TEXT_CHARS) || 200000;
-      let mainChars = 0;
-      let reasoningChars = 0;
-      let firstAt = 0;
-      let lastAt = 0;
-      let sawDone = false;
-      let sawError = false;
-      let text = '';
-      let truncated = false;
-      for (const frame of frames) {
-        const payload = frame.data;
-        if (payload === '[DONE]' || /"type"\s*:\s*"done"|"finish_reason"\s*:\s*"(stop|end_turn)"/.test(payload)) {
-          sawDone = true;
-        }
-        if (/"error\s*":/.test(payload)) sawError = true;
-        if (!firstAt) firstAt = frame.at;
-        lastAt = frame.at;
-        for (const line of payload.split(/\r?\n/)) {
-          const body = line.replace(/^data:\s*/, '').trim();
-          if (!body) continue;
-          if (body.startsWith(prefixMain)) {
-            mainChars += body.length - prefixMain.length;
-            if (text.length < limit) {
-              const piece = this.frameText(line, prefixMain);
-              if (piece) {
-                // A chunk can be a rewrite (the site re-sends the whole text) or
-                // an append; `startsWith` tells them apart without the DOM.
-                if (text && piece.startsWith(text)) text = piece;
-                else text += piece;
-              }
-            } else {
-              truncated = true;
-            }
-          } else if (body.startsWith(prefixReason)) {
-            reasoningChars += body.length - prefixReason.length;
-          }
-        }
+      const agg = this.active;
+      if (agg) {
+        return {
+          frames: agg.frames,
+          mainChars: agg.mainChars,
+          reasoningChars: agg.reasoningChars,
+          text: agg.text,
+          textTruncated: agg.textTruncated,
+          firstAt: agg.firstAt,
+          lastAt: agg.lastAt,
+          idleMs: agg.lastAt ? Date.now() - agg.lastAt : null,
+          sawDone: agg.sawDone,
+          sawError: agg.sawError,
+        };
       }
-      return {
+      // diagnostics: aggregate whatever is retained (no request running)
+      const frames = this.frames.slice(-20);
+      const summary = {
         frames: frames.length,
-        mainChars,
-        reasoningChars,
-        text: text.slice(0, limit),
-        textTruncated: truncated,
-        firstAt,
-        lastAt,
-        idleMs: lastAt ? Date.now() - lastAt : null,
-        sawDone,
-        sawError,
+        mainChars: 0,
+        reasoningChars: 0,
+        text: '',
+        textTruncated: false,
+        firstAt: 0,
+        lastAt: 0,
+        idleMs: null,
+        sawDone: false,
+        sawError: false,
       };
+      for (const frame of frames) {
+        const parsed = this.parseFrame(frame, null);
+        summary.mainChars += parsed.mainChars;
+        summary.reasoningChars += parsed.reasoningChars;
+        if (parsed.text) summary.text += parsed.text;
+        if (parsed.sawDone) summary.sawDone = true;
+        if (parsed.sawError) summary.sawError = true;
+        if (!summary.firstAt) summary.firstAt = frame.at;
+        summary.lastAt = frame.at;
+      }
+      if (summary.lastAt) summary.idleMs = Date.now() - summary.lastAt;
+      return summary;
     },
   };
 
@@ -695,35 +877,165 @@
       return 'unknown';
     },
 
+    /**
+     * Short probes of the typed prompt used to recognise the site echoing it
+     * back.  Agent mode pastes the whole built transcript, so both its head
+     * and its tail appear in the user bubble; direct mode short prompts are
+     * deliberately not fingerprinted (too short to be unambiguous).
+     */
+    promptFingerprints(promptText) {
+      const text = String(promptText || '').trim();
+      if (text.length < 24) return [];
+      const out = [text.slice(0, 160)];
+      const tail = text.slice(-160);
+      if (tail.length >= 24 && tail !== out[0]) out.push(tail);
+      return out;
+    },
+
     /** Assistant message elements (cheap: text is only extracted on demand). */
     assistantElements(promptText) {
       const messages = this.readMessages();
       const assistants = messages.filter((m) => m.role === 'assistant' && (m.el.textContent || '').trim());
       if (assistants.length) return assistants;
 
-      const fingerprint = (promptText || '').trim().slice(0, 160);
+      const fingerprints = this.promptFingerprints(promptText);
+      // The exclusion check runs on every message every tick, so it uses the
+      // raw textContent - never the markdown conversion.
       return messages
         .filter((m) => m.role !== 'user')
         .filter((m) => (m.el.textContent || '').trim())
-        .filter((m) => {
-          if (!fingerprint || fingerprint.length < 24) return true;
-          return !messageText(m.el).includes(fingerprint);
-        });
+        .filter((m) => !fingerprints.length || !fingerprints.some((f) => (m.el.textContent || '').includes(f)));
     },
 
     snapshot(promptText) {
       const assistants = this.assistantElements(promptText);
       const last = assistants[assistants.length - 1];
-      return { count: assistants.length, lastText: last ? messageText(last.el) : '' };
+      return {
+        count: assistants.length,
+        lastText: last ? messageText(last.el) : '',
+        /** text of the chat region before typing, for the growth fallback */
+        growthBase: assistants.length ? null : this.growthText(),
+      };
+    },
+
+    // -------- redesign-proof fallback -------------------------------------
+    // When no known message selector matches (the site was redesigned, roles
+    // and classes moved), the answer still has to *be* somewhere in the page -
+    // the user can read it.  Track how the readable text of the main region
+    // grows and hand back whatever appeared after our own prompt echo.  It is
+    // the last resort, not the primary path: selectors stay preferable.
+
+    /** Containers whose text never counts as "the answer grew". */
+    growthSkip: [
+      'form',
+      'textarea',
+      'input',
+      'button',
+      'select',
+      'nav',
+      'aside',
+      'header',
+      'footer',
+      'script',
+      'style',
+      'noscript',
+      'svg',
+      '[contenteditable]',
+      '[role="textbox"]',
+      '[aria-hidden="true"]',
+    ],
+
+    regionElement() {
+      for (const css of ['main', '[role="main"]', '#__next', '#root', '#app']) {
+        try {
+          const el = document.querySelector(css);
+          if (el) return el;
+        } catch (_) {
+          /* bad selector in a runtime override */
+        }
+      }
+      return document.body || document.documentElement;
+    },
+
+    /** Visible-ish text of the chat region (no layout access, no markdown). */
+    growthText() {
+      const root = this.regionElement();
+      if (!root) return '';
+      const skip = this.growthSkip.concat((this.selectors().ignoreInside) || []);
+      let out = '';
+      const walk = (node) => {
+        for (const child of node.childNodes) {
+          if (out.length > 500000) return; // hard safety bound
+          if (child.nodeType === Node.TEXT_NODE) {
+            out += child.nodeValue || '';
+            continue;
+          }
+          if (child.nodeType !== Node.ELEMENT_NODE) continue;
+          if (matchesAny(child, skip)) continue;
+          walk(child);
+        }
+      };
+      try {
+        walk(root);
+      } catch (error) {
+        warn('growth fallback could not read the page', error);
+        return '';
+      }
+      return out;
+    },
+
+    /**
+     * Cut the echoed prompt off the front of a growth delta.  The site renders
+     * what we typed as the user bubble, so the delta usually starts (or, in
+     * agent mode, ends) with our own prompt - and a delta that is *only* the
+     * echo is not an answer at all.
+     */
+    stripPromptEcho(delta, promptText, rewritten) {
+      const prompt = String(promptText || '').trim();
+      const trimmed = String(delta || '').trim();
+      if (!prompt || trimmed === prompt) return ''; // just our own echo
+      if (!trimmed) return '';
+
+      // 1. long prompts: the answer begins right after the last occurrence of
+      //    the prompt's tail (whitespace may differ between the textarea and
+      //    the rendered bubble, so runs match flexibly; window is bounded).
+      if (prompt.length >= 24) {
+        const tail = prompt.slice(-240);
+        const window = trimmed.slice(0, Math.min(trimmed.length, prompt.length + 4000));
+        try {
+          const finder = new RegExp(tail.split(/\s+/).map(escapeRegExp).join('\\s+'), 'g');
+          let end = -1;
+          let match;
+          while ((match = finder.exec(window)) !== null) end = match.index + match[0].length;
+          if (end !== -1) return trimmed.slice(end).trim();
+        } catch (_) {
+          /* pathological prompt - fall through */
+        }
+      }
+
+      // 2. any prompt length: a plain prefix echo.
+      if (trimmed.startsWith(prompt)) return trimmed.slice(prompt.length).trim();
+      const normalised = trimmed.replace(/\s+/g, ' ');
+      const normalisedPrompt = prompt.replace(/\s+/g, ' ');
+      if (normalisedPrompt.length >= 8 && normalised.startsWith(normalisedPrompt)) {
+        return trimmed.slice(prompt.length).trim();
+      }
+
+      // 3. nothing recognisable: in rewritten mode do not invent an answer.
+      if (rewritten) return '';
+      return delta.length > prompt.length + 16 ? trimmed : '';
     },
 
     /**
      * Answer text for the current turn.
-     * @returns {{text: string, isNew: boolean, total: string, rewritten?: boolean}}
+     * @returns {{text: string, isNew: boolean, total: string, rewritten?: boolean, growth?: boolean}}
      */
-    answerText(baseline, promptText) {
+    answerText(baseline, promptText, options) {
       const assistants = this.assistantElements(promptText);
-      if (!assistants.length) return { text: '', isNew: false, total: '' };
+      if (!assistants.length) {
+        if (options && options.allowGrowth === false) return { text: '', isNew: false, total: '' };
+        return this.growthAnswer(baseline, promptText);
+      }
       const last = assistants[assistants.length - 1];
       const total = messageText(last.el);
       const baselineText = (baseline && baseline.lastText) || '';
@@ -736,6 +1048,25 @@
       }
       // The UI rewrote the element instead of appending to it.
       return { text: total, isNew: false, total, rewritten: true };
+    },
+
+    /** Last resort: the answer as "text that appeared in the page". */
+    growthAnswer(baseline, promptText) {
+      const base = baseline && baseline.growthBase;
+      if (typeof base !== 'string') return { text: '', isNew: false, total: '' };
+      const current = this.growthText();
+      if (!current || current === base) return { text: '', isNew: false, total: current };
+      let delta;
+      let rewritten = false;
+      if (current.startsWith(base)) delta = current.slice(base.length);
+      else {
+        // the page rewrote/re-rendered (or dropped old turns): fall back to
+        // "everything after our prompt echo", which is still just the answer
+        delta = current;
+        rewritten = true;
+      }
+      const text = this.stripPromptEcho(delta, promptText, rewritten);
+      return { text, isNew: Boolean(text), total: current, growth: true, rewritten };
     },
 
     // -------- input -------------------------------------------------------
@@ -939,6 +1270,11 @@
     handshakeDone: false,
     serverVersion: null,
     override: null,
+    /** answers/diagnostics that could not be sent yet (socket was down) */
+    outbox: [],
+    outboxTimer: null,
+    OUTBOX_MAX: 8,
+    OUTBOX_TTL_MS: 120000,
 
     async loadOverride() {
       try {
@@ -1003,6 +1339,7 @@
           url: location.href,
         });
         this.sendHeartbeat();
+        this.flushOutbox();
       });
 
       socket.addEventListener('message', (event) => {
@@ -1060,6 +1397,49 @@
       } catch (_) {
         return false;
       }
+    },
+
+    /**
+     * Send a message that must survive a socket blink (a finished answer, a
+     * diagnostics reply).  If the socket is down it is kept in a small outbox
+     * and flushed when the connection is back - an answer must never be lost
+     * just because the WebSocket reconnected at the wrong moment.  `opts.ttlAt`
+     * (a timestamp) is the moment the server stops caring about it.
+     */
+    sendCritical(payload, opts) {
+      if (this.send(payload)) return true;
+      const now = Date.now();
+      const ttlAt = (opts && opts.ttlAt) || now + this.OUTBOX_TTL_MS;
+      this.outbox = this.outbox.filter((item) => now < (item.ttlAt || item.at + this.OUTBOX_TTL_MS));
+      if (this.outbox.length >= this.OUTBOX_MAX) this.outbox.shift();
+      this.outbox.push({ payload, at: now, ttlAt });
+      log('socket closed - queued a %s frame (%d waiting)', payload && payload.type, this.outbox.length);
+      this.scheduleOutbox();
+      return false;
+    },
+
+    scheduleOutbox() {
+      if (this.outboxTimer || !this.outbox.length) return;
+      this.outboxTimer = setTimeout(() => {
+        this.outboxTimer = null;
+        this.flushOutbox();
+      }, 1000);
+    },
+
+    flushOutbox() {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        this.scheduleOutbox();
+        return;
+      }
+      const now = Date.now();
+      const kept = [];
+      for (const item of this.outbox) {
+        if (now >= (item.ttlAt || item.at + this.OUTBOX_TTL_MS)) continue; // the server moved on
+        if (this.send(item.payload)) continue;
+        kept.push(item);
+      }
+      this.outbox = kept;
+      if (this.outbox.length) this.scheduleOutbox();
     },
 
     lastHeartbeatAt: 0,
@@ -1191,7 +1571,7 @@
         case 'diagnose':
           // The admin panel asks for a snapshot of the live page.
           this.note('diagnose snapshot requested');
-          Transport.send({
+          Transport.sendCritical({
             type: 'diag',
             id: payload.id,
             state: Transport.state,
@@ -1234,7 +1614,7 @@
           return;
         }
         this.note('busy: refused a second request');
-        Transport.send({
+        Transport.sendCritical({
           type: 'response',
           id: payload.id,
           error: 'busy',
@@ -1251,43 +1631,52 @@
       this.reportState();
 
       const started = Date.now();
+      // The server keeps waiting for this id until its own deadline; a queued
+      // answer must survive in the outbox exactly that long, no longer.
+      const serverDeadline = started + (Number(payload.timeout) || 300) * 1000 + 25000;
       try {
         const result = await Pipeline.run(payload);
         this.lastAnswerMs = Date.now() - started;
         this.answeredCount += 1;
         this.lastAction = `answer sent in ${(this.lastAnswerMs / 1000).toFixed(1)}s (${result.stopReason})`;
-        Transport.send({
-          type: 'response',
-          id: payload.id,
-          response: result.text,
-          error: null,
-          meta: {
-            duration_ms: Date.now() - started,
-            stop_reason: result.stopReason,
-            from_stream: Boolean(result.fromStream),
-            stream: result.stream,
-            url: location.href,
-            mode: payload.mode || 'agent',
-            kept_working: result.keptWorking || null,
+        Transport.sendCritical(
+          {
+            type: 'response',
+            id: payload.id,
+            response: result.text,
+            error: null,
+            meta: {
+              duration_ms: Date.now() - started,
+              stop_reason: result.stopReason,
+              from_stream: Boolean(result.fromStream),
+              stream: result.stream,
+              url: location.href,
+              mode: payload.mode || 'agent',
+              kept_working: result.keptWorking || null,
+            },
           },
-        });
+          { ttlAt: serverDeadline }
+        );
         log('answered %s in %d ms (%s)', String(payload.id).slice(0, 8), Date.now() - started, result.stopReason);
       } catch (error) {
         const code = (error && error.code) || 'unknown_error';
         this.lastError = `${code}: ${(error && error.message) || error}`;
         this.lastAction = `failed: ${code}`;
         warn('request failed:', this.lastError);
-        Transport.send({
-          type: 'response',
-          id: payload.id,
-          response: null,
-          error: code,
-          meta: {
-            message: String((error && error.message) || error),
-            duration_ms: Date.now() - started,
-            url: location.href,
+        Transport.sendCritical(
+          {
+            type: 'response',
+            id: payload.id,
+            response: null,
+            error: code,
+            meta: {
+              message: String((error && error.message) || error),
+              duration_ms: Date.now() - started,
+              url: location.href,
+            },
           },
-        });
+          { ttlAt: serverDeadline }
+        );
       } finally {
         this.busy = false;
         this.currentRequest = null;
@@ -1344,22 +1733,27 @@
       }
 
       const baseline = SiteDriver.snapshot(prompt);
-      const mark = StreamCapture.mark();
+      // The aggregate (and the page hook's capture flag) lives for the whole
+      // turn: frames from the submit window belong to this request.
+      const mark = StreamCapture.beginRequest();
+      try {
+        const method = await SiteDriver.typePrompt(input, prompt, behavior);
+        log('prompt inserted via %s (%d chars)', method, prompt.length);
+        await sleep(behavior.SUBMIT_DELAY_MS || 200);
 
-      const method = await SiteDriver.typePrompt(input, prompt, behavior);
-      log('prompt inserted via %s (%d chars)', method, prompt.length);
-      await sleep(behavior.SUBMIT_DELAY_MS || 200);
+        await this.submit(input, prompt);
 
-      await this.submit(input, prompt);
+        const result = await this.capture(payload, baseline, prompt, mark);
 
-      const result = await this.capture(payload, baseline, prompt, mark);
-
-      // Agent mode ends with a poll in the composer - answer it so the next
-      // request finds a free chat box (direct mode has no survey).
-      if ((payload.mode || 'agent') !== 'direct') {
-        result.keptWorking = await this.handOff();
+        // Agent mode ends with a poll in the composer - answer it so the next
+        // request finds a free chat box (direct mode has no survey).
+        if ((payload.mode || 'agent') !== 'direct') {
+          result.keptWorking = await this.handOff();
+        }
+        return result;
+      } finally {
+        StreamCapture.endRequest();
       }
-      return result;
     },
 
     /**
@@ -1406,8 +1800,12 @@
           const text = SiteDriver.currentInputText(input);
           if (!text || text.length < Math.min(8, prompt.trim().length)) return true; // box cleared
           if (SiteDriver.findStopButton()) return true;
-          if (StreamCapture.lastActivityAt > startedAt - 1000) return true;
-          const answer = SiteDriver.answerText({ count: Number.MAX_SAFE_INTEGER, lastText: '' }, prompt);
+          if (StreamCapture.lastActivityAt >= startedAt) return true; // stream answered
+          const answer = SiteDriver.answerText(
+            { count: Number.MAX_SAFE_INTEGER, lastText: '', growthBase: '' },
+            prompt,
+            { allowGrowth: false }
+          );
           return Boolean(answer && answer.text.length > 2);
         },
         { timeout, interval: 200 }
@@ -1420,7 +1818,7 @@
           () =>
             !SiteDriver.currentInputText(input) ||
             Boolean(SiteDriver.findStopButton()) ||
-            StreamCapture.lastActivityAt > startedAt - 1000,
+            StreamCapture.lastActivityAt >= startedAt,
           { timeout: Math.min(8000, timeout), interval: 250 }
         );
         if (!retried) {
@@ -1436,6 +1834,15 @@
     async capture(payload, baseline, prompt, mark) {
       const behavior = CFG.behavior || {};
       const mode = payload.mode || 'agent';
+      // The server gives up on this request at `timeout + 30s`.  A background
+      // tab can have its timers throttled to one wake per minute, so the
+      // decision (and the send) must happen a safe margin BEFORE that
+      // deadline - otherwise the model's answer is produced and still lost.
+      const budgetMs = Math.min((Number(payload.timeout) || 300) * 1000, behavior.MAX_WAIT_MS || 300000);
+      const margin = Math.min(
+        behavior.ANSWER_SEND_MARGIN_MS === undefined ? 15000 : behavior.ANSWER_SEND_MARGIN_MS,
+        Math.max(0, budgetMs - 2000)
+      );
       const ctx = {
         poll: behavior.POLL_INTERVAL_MS || 300,
         stableMs: behavior.STABLE_MS || 3000,
@@ -1450,7 +1857,7 @@
         survey: Boolean(behavior.AUTO_KEEP_WORKING) && mode !== 'direct',
         surveySettleMs: behavior.SURVEY_SETTLE_MS || 700,
         partialOnTimeout: behavior.PARTIAL_ON_TIMEOUT !== false,
-        maxWait: Math.min((Number(payload.timeout) || 300) * 1000, behavior.MAX_WAIT_MS || 300000),
+        maxWait: Math.max(2000, budgetMs - margin),
         startedAt: Date.now(),
         lastText: '',
         stableSince: Date.now(),
@@ -1462,10 +1869,17 @@
       };
 
       Signal.start();
+      // A mutation storm must not turn the tick into a busy loop: evaluate at
+      // most every `minStepMs`, no matter how often the observers fire.
+      const minStepMs = Math.max(50, Math.min(ctx.poll, 200));
+      let lastStepAt = 0;
       try {
         for (;;) {
-          const decision = this.captureStep(ctx, baseline, prompt, mark);
-          if (decision) return decision;
+          if (Date.now() - lastStepAt >= minStepMs) {
+            lastStepAt = Date.now();
+            const decision = this.captureStep(ctx, baseline, prompt, mark);
+            if (decision) return decision;
+          }
           await Signal.wait(ctx.poll);
         }
       } finally {
@@ -1510,7 +1924,13 @@
         throw new BridgeFailure('captcha', 'a captcha appeared; solve it manually in this tab');
       }
 
-      const answer = SiteDriver.answerText(baseline, prompt);
+      // The stream snapshot is O(1) now (incremental aggregate); it comes first
+      // because the growth fallback must stay off while the site's own stream
+      // already carries the answer text.
+      const summary = StreamCapture.summary(mark);
+      ctx.lastSummary = summary;
+
+      const answer = SiteDriver.answerText(baseline, prompt, { allowGrowth: !summary.text });
       const text = (answer.text || '').trim();
       if (text && text !== ctx.lastText) {
         if (!ctx.lastText || text.length > ctx.lastText.length) {
@@ -1522,8 +1942,6 @@
       }
 
       this.touchTick();
-      const summary = StreamCapture.summary(mark);
-      ctx.lastSummary = summary;
       const stopVisible = Boolean(SiteDriver.findStopButton());
       const idleFor = Date.now() - ctx.stableSince;
       const streamIdle = summary.lastAt ? Date.now() - summary.lastAt : null;
@@ -1599,7 +2017,10 @@
           throw new BridgeFailure('submit_failed', 'the prompt is still in the box; the site never submitted it');
         }
       }
-      if (!ctx.lastText && elapsed > ctx.noOutputMs) {
+      // Nothing from the DOM *and* the stream is empty or itself silent for
+      // the whole window (an active stream suppresses the error).
+      const streamSilent = !summary.text || (summary.lastAt && now - summary.lastAt > ctx.noOutputMs);
+      if (!ctx.lastText && streamSilent && elapsed > ctx.noOutputMs) {
         if (summary.sawError) {
           throw new BridgeFailure('page_error', 'the site reported an error for this request');
         }
