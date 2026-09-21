@@ -1,12 +1,17 @@
 [project]
 name = "arena-agent-bridge"
-version = "1.3.0"
+version = "1.4.0"
 description = "Local OpenAI-compatible bridge from Hermes/OpenClaw to the Arena.ai/Agent web UI"
 requires-python = ">=3.10"
 readme = "README.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Bare `pytest` (no `python -m pytest`) does not put the repo root on sys.path,
+# so tests/conftest.py could not import the `server` package - the CI job has
+# been failing on this since the first commit. `pythonpath` fixes every way of
+# invoking the suite (CI, make, IDE).
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
