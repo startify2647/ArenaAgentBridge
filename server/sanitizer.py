@@ -80,8 +80,18 @@ BUILTIN_RULES: Sequence[tuple] = (
     ("dd_to_device", "destructive-fs", "block", r"\bdd\b[^\n]{0,80}\bof=/dev/(?:sd|nvme|hd|vd|disk)"),
     ("shred_device", "destructive-fs", "block", r"\bshred\b[^\n]{0,80}/dev/(?:sd|nvme|hd|vd)"),
     ("fork_bomb", "destructive-fs", "block", r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;?\s*:"),
-    ("chmod_root", "destructive-fs", "block", r"\bchmod\s+(?:-R\s+)?(?:777|a\+rwx)\s+/(?:\s|$)"),
-    ("chown_root", "destructive-fs", "block", r"\bchown\s+-R\s+[^\n]{0,40}\s+/(?:\s|$)"),
+    (
+        "chmod_root",
+        "destructive-fs",
+        "block",
+        r"\bchmod\s+(?:-R\s+)?(?:777|a\+rwx)\s+(?:/(?:\s|$|\*)|/etc\b|/usr\b|/var\b|/boot\b|/home\b|~(?:\s|$|/))",
+    ),
+    (
+        "chown_root",
+        "destructive-fs",
+        "block",
+        r"\bchown\s+(?:-R\s+)?[^|\n]{0,40}\s+(?:/\s*$|/\s+/|/etc\b|/usr\b|/var\b|/boot\b|/home\b|~\s*$)",
+    ),
     (
         "wipe_windows",
         "destructive-fs",
@@ -176,8 +186,22 @@ BUILTIN_RULES: Sequence[tuple] = (
         "block",
         r"(?:>>?\s*~?/?\.ssh/authorized_keys|echo\s+['\"]?ssh-(?:rsa|ed25519)[^\n]{0,200}>>\s*\S*authorized_keys)",
     ),
-    ("cron_backdoor", "persistence", "block", r"(?:crontab\s+-|\|\s*crontab\b)|\becho[^\n]{0,120}>>\s*/etc/cron"),
-    ("shell_profile_backdoor", "persistence", "block", r">>?\s*~?/?\.(?:bashrc|zshrc|profile|bash_profile)\b"),
+    # `crontab -l/-e` and installing a file are routine maintenance; the
+    # destructive flags (-r/-R wipe, -w/-W dump) and piping into crontab are not.
+    (
+        "cron_backdoor",
+        "persistence",
+        "block",
+        r"(?:\bcrontab\s+-[rRwW]\b|\|\s*crontab\b|\becho[^\n]{0,120}>>\s*/etc/cron)",
+    ),
+    # Appending to shell profiles is how tools *and* users install aliases and
+    # PATH entries: report it, do not rewrite it.
+    (
+        "shell_profile_backdoor",
+        "persistence",
+        "warn",
+        r">>?\s*~?/?\.(?:bashrc|zshrc|profile|bash_profile|zprofile|zshenv|bash_login)\b",
+    ),
     # --- git / infra (usually legitimate, reported only) -------------------
     ("git_force_push", "risky-git", "warn", r"\bgit\s+push\b[^\n]{0,60}(?:--force(?![-\w])|-f\b)"),
     ("git_hard_reset", "risky-git", "warn", r"\bgit\s+(?:reset\s+--hard|clean\s+-[a-z]*f[a-z]*d)"),

@@ -153,6 +153,20 @@ def test_inject_hook_only_observes():
         assert forbidden not in source, f"inject.js touches {forbidden}"
 
 
+def test_content_script_stays_dormant_off_agent_pages():
+    """The performance contract: on non-agent arena.ai pages the content
+    script and the page-world hook must stay dormant (no socket, no observers,
+    no WebSocket/fetch wrapping).  These guards keep that gate from being
+    silently removed."""
+
+    content = (SHARED / "content.js").read_text(encoding="utf-8")
+    assert "isAgentPage" in content, "the agent-page gate is missing"
+    assert "watchForAgentPath" in content, "the SPA-navigation wake-up is missing"
+    inject = (SHARED / "inject.js").read_text(encoding="utf-8")
+    assert "data-aab-agent" in inject, "inject.js lost its dormant gate"
+    assert "TICK_FAST_MS" in (SHARED / "config.js").read_text(encoding="utf-8")
+
+
 def test_cross_browser_guards_are_present():
     """The shared sources must stay loadable in both engines."""
     background = (SHARED / "background.js").read_text(encoding="utf-8")

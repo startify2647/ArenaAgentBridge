@@ -892,8 +892,52 @@
       return out;
     },
 
-    /** Assistant message elements (cheap: text is only extracted on demand). */
+    /**
+     * Assistant message elements.
+     *
+     * Fast path (hot - runs on every capture tick): query ONLY the dedicated
+     * assistant/role selectors and test non-emptiness in O(1)
+     * (`childElementCount`), so an idle tab costs two selector passes instead
+     * of the old full three-selector join plus a `textContent` scan of every
+     * message on the page.  That old scan of a long conversation several
+     * times a second is what made the extension feel heavy (especially in
+     * Firefox, where layout/text work is pricier).
+     *
+     * Slow path (only when the fast selectors hit nothing - e.g. a redesigned
+     * markup): the old behaviour, including the fingerprint fallback.
+     */
     assistantElements(promptText) {
+      const s = this.selectors();
+      const fast = []
+        .concat(s.assistantMessage || [])
+        .concat(s.messageRoleAny || [])
+        .map((entry) => (typeof entry === 'string' ? entry : entry && entry.css))
+        .filter(Boolean)
+        .join(', ');
+      if (fast) {
+        let nodes = null;
+        try {
+          nodes = Array.from(document.querySelectorAll(fast));
+        } catch (_) {
+          nodes = null; // a runtime override with an invalid selector
+        }
+        if (nodes && nodes.length) {
+          const set = new Set(nodes);
+          const assistants = nodes
+            .filter((el) => {
+              let parent = el.parentElement;
+              while (parent) {
+                if (set.has(parent)) return false; // nested duplicate
+                parent = parent.parentElement;
+              }
+              return true;
+            })
+            .filter((el) => this.roleOf(el) === 'assistant')
+            .filter((el) => el.childElementCount > 0 || (el.textContent || '').trim());
+          if (assistants.length) return assistants.map((el) => ({ el, role: 'assistant' }));
+        }
+      }
+
       const messages = this.readMessages();
       const assistants = messages.filter((m) => m.role === 'assistant' && (m.el.textContent || '').trim());
       if (assistants.length) return assistants;
@@ -905,6 +949,64 @@
         .filter((m) => m.role !== 'user')
         .filter((m) => (m.el.textContent || '').trim())
         .filter((m) => !fingerprints.length || !fingerprints.some((f) => (m.el.textContent || '').includes(f)));
+    },
+
+    /**
+     * Markdown extraction cache for the element currently being read, driven
+     * by a MutationObserver on THAT element (not the whole document).
+     *
+     * The hot path used to rebuild the raw `textContent` of the answer on
+     * every tick just to ask "did it change?" - a 100k-char answer meant a
+     * 100k-char string allocation several times a second, for as long as the
+     * page stayed open.  Now the observer flags the text dirty only on real
+     * changes; quiet ticks read nothing.  A 2 s fallback re-read keeps it
+     * correct when no observer can be installed.
+     */
+    textState: { el: null, observer: null, raw: null, text: '', dirty: true, lastReadAt: 0 },
+
+    watchText(el) {
+      const st = this.textState;
+      if (st.el === el && st.observer) return;
+      if (st.observer) {
+        try {
+          st.observer.disconnect();
+        } catch (_) {
+          /* element already gone */
+        }
+      }
+      st.el = el;
+      st.raw = null;
+      st.text = '';
+      st.dirty = true; // force one real read of the new element
+      st.lastReadAt = Date.now();
+      try {
+        st.observer = new MutationObserver(() => {
+          st.dirty = true;
+        });
+        st.observer.observe(el, { subtree: true, childList: true, characterData: true });
+      } catch (_) {
+        st.observer = null; // the 2 s fallback in watchedText() keeps it correct
+      }
+    },
+
+    /** Extracted text of `el` - recomputed only when it actually changed. */
+    watchedText(el) {
+      if (!el) return '';
+      this.watchText(el);
+      const st = this.textState;
+      const now = Date.now();
+      if (!st.dirty && now - st.lastReadAt < 2000) return st.text;
+      const raw = el.textContent || '';
+      if (!st.dirty && raw === st.raw) {
+        st.lastReadAt = now; // the observer already told us: nothing new
+        return st.text;
+      }
+      const text = extractText(el);
+      st.raw = raw;
+      st.text = text;
+      st.dirty = false;
+      st.lastReadAt = now;
+      return text;
     },
 
     snapshot(promptText) {
@@ -1037,7 +1139,7 @@
         return this.growthAnswer(baseline, promptText);
       }
       const last = assistants[assistants.length - 1];
-      const total = messageText(last.el);
+      const total = this.watchedText(last.el);
       const baselineText = (baseline && baseline.lastText) || '';
 
       if (assistants.length > (baseline ? baseline.count : 0)) return { text: total, isNew: true, total };
@@ -1286,7 +1388,12 @@
     },
 
     url() {
-      return this.override || (CFG && CFG.SERVER_WS_URL) || 'ws://127.0.0.1:8000/ws/browser';
+      let url = this.override || (CFG && CFG.SERVER_WS_URL) || 'ws://127.0.0.1:8000/ws/browser';
+      const token = (CFG && CFG.WS_TOKEN) || '';
+      if (token && url.indexOf('token=') === -1) {
+        url += (url.indexOf('?') === -1 ? '?' : '&') + 'token=' + encodeURIComponent(token);
+      }
+      return url;
     },
 
     async start() {
@@ -1483,6 +1590,44 @@
   };
 
   // -------------------------------------------------------------------------
+  // Keepalive port: opened while a request runs, closed when idle.
+  //
+  // Holding a runtime port open with a 20 s message interval keeps the MV3
+  // service worker (and Firefox's event page) alive *indefinitely* - that was
+  // a permanent memory/CPU cost just to have the door open.  The port now
+  // exists only while the tab is actually answering.
+  // -------------------------------------------------------------------------
+  const KeepalivePort = {
+    port: null,
+    timer: null,
+    set(on) {
+      if (on && !this.timer) {
+        try {
+          this.port = chrome.runtime.connect({ name: 'aab-keepalive' });
+        } catch (_) {
+          this.port = null; // not an extension context (tests) - the alarm ping covers it
+        }
+        this.timer = setInterval(() => {
+          try {
+            this.port && this.port.postMessage({ kind: 'keepalive', state: Transport.state, busy: Bridge.busy });
+          } catch (_) {
+            /* the worker went away mid-request */
+          }
+        }, 20000);
+      } else if (!on && this.timer) {
+        clearInterval(this.timer);
+        this.timer = null;
+        try {
+          this.port && this.port.disconnect && this.port.disconnect();
+        } catch (_) {
+          /* already gone */
+        }
+        this.port = null;
+      }
+    },
+  };
+
+  // -------------------------------------------------------------------------
   // Bridge
   // -------------------------------------------------------------------------
   const Bridge = {
@@ -1526,9 +1671,10 @@
       this.reportState();
     },
 
-    reportState() {
+    lastStateJson: '',
+    reportState(force) {
       this.state = Transport.state;
-      sendToBackground({
+      const payload = {
         kind: 'state',
         state: this.busy ? 'busy' : Transport.state,
         busy: this.busy,
@@ -1545,7 +1691,14 @@
           source: StreamCapture.hookSource,
           mode: (CFG.capture && CFG.capture.INJECTION) || 'manifest',
         },
-      });
+      };
+      // The heartbeat re-sends the snapshot every 30 s; when nothing changed
+      // (the common case while idle) the background would only rewrite the
+      // session storage and ping the popup - so skip it.
+      const json = JSON.stringify(payload);
+      if (!force && json === this.lastStateJson) return;
+      this.lastStateJson = json;
+      sendToBackground(payload);
     },
 
     async onMessage(payload) {
@@ -1629,11 +1782,16 @@
       this.lastAction = `answering: ${String((payload.prompt || '').trim()).slice(0, 60)}`;
       Badge.set('busy', 'answering…');
       this.reportState();
+      // Keep the MV3 worker alive only while actually working (a port held
+      // open forever with a 20 s interval is what kept the worker - and a
+      // chunk of its memory - resident all the time).
+      KeepalivePort.set(true);
 
       const started = Date.now();
       // The server keeps waiting for this id until its own deadline; a queued
       // answer must survive in the outbox exactly that long, no longer.
-      const serverDeadline = started + (Number(payload.timeout) || 300) * 1000 + 25000;
+      // (+20s mirrors the worker's `timeout + 20` margin on the server side.)
+      const serverDeadline = started + (Number(payload.timeout) || 300) * 1000 + 20000;
       try {
         const result = await Pipeline.run(payload);
         this.lastAnswerMs = Date.now() - started;
@@ -1682,6 +1840,7 @@
         this.currentRequest = null;
         Badge.set(Transport.state, Transport.state === 'connected' ? 'connected' : Transport.state);
         this.reportState();
+        KeepalivePort.set(false);
       }
     },
   };
@@ -1866,25 +2025,55 @@
         lastIdleWarnAt: 0,
         sawActivity: false,
         lastSummary: null,
+        /**
+         * Cached page probes (timestamps + values).  The old code re-ran
+         * ~20 selector scans (stop button, survey, captcha, login wall) on
+         * EVERY tick - the dominant fixed cost while a long answer streamed.
+         * Now each probe is re-checked on its own (short) TTL; a fresh
+         * captcha still trips within 2 s, a removed Stop button within 300 ms.
+         */
+        probes: { stop: 0, survey: 0, captcha: 0, login: 0, values: {} },
       };
+
+      const adaptive = behavior.ADAPTIVE_TICK !== false;
+      const fastMs = Math.max(60, Math.min(ctx.poll, behavior.TICK_FAST_MS || 150));
 
       Signal.start();
       // A mutation storm must not turn the tick into a busy loop: evaluate at
       // most every `minStepMs`, no matter how often the observers fire.
       const minStepMs = Math.max(50, Math.min(ctx.poll, 200));
       let lastStepAt = 0;
+      let active = true;
       try {
         for (;;) {
           if (Date.now() - lastStepAt >= minStepMs) {
             lastStepAt = Date.now();
+            const before = { text: ctx.lastText, stream: ctx.lastStreamAt };
             const decision = this.captureStep(ctx, baseline, prompt, mark);
             if (decision) return decision;
+            // "active" = the answer grew or a stream frame arrived since the
+            // previous tick.  Active -> tick fast (catch the end of the
+            // stream sooner); settled -> the normal poll rate.  The win in
+            // the quiet phase is not a lower rate but a MUCH cheaper tick
+            // (watchedText + cached probes + the fast selector path); real
+            // DOM/stream events still wake the loop early through Signal.
+            active = ctx.lastText !== before.text || ctx.lastStreamAt > before.stream;
           }
-          await Signal.wait(ctx.poll);
+          await Signal.wait(adaptive && active ? fastMs : ctx.poll);
         }
       } finally {
         Signal.stop();
       }
+    },
+
+    /** Run `fn` at most every `ttlMs` while this capture is alive. */
+    probe(ctx, name, ttlMs, fn) {
+      const now = Date.now();
+      if (now - (ctx.probes[name] || 0) >= ttlMs) {
+        ctx.probes[name] = now;
+        ctx.probes.values[name] = fn();
+      }
+      return ctx.probes.values[name];
     },
 
     /**
@@ -1916,10 +2105,10 @@
         }
         throw new BridgeFailure('response_timeout', `no stable answer within ${Math.round(ctx.maxWait / 1000)}s`);
       }
-      if (SiteDriver.isLoggedOut()) {
+      if (this.probe(ctx, 'login', 2000, () => SiteDriver.isLoggedOut())) {
         throw new BridgeFailure('not_logged_in', 'the session was logged out mid-request');
       }
-      if (SiteDriver.hasCaptcha()) {
+      if (this.probe(ctx, 'captcha', 2000, () => SiteDriver.hasCaptcha())) {
         if (ctx.lastText) return { text: ctx.lastText, stopReason: 'captcha', stream: ctx.lastSummary };
         throw new BridgeFailure('captcha', 'a captcha appeared; solve it manually in this tab');
       }
@@ -1942,7 +2131,7 @@
       }
 
       this.touchTick();
-      const stopVisible = Boolean(SiteDriver.findStopButton());
+      const stopVisible = Boolean(this.probe(ctx, 'stop', 300, () => SiteDriver.findStopButton()));
       const idleFor = Date.now() - ctx.stableSince;
       const streamIdle = summary.lastAt ? Date.now() - summary.lastAt : null;
       const silentFor = Date.now() - ctx.lastChangeAt;
@@ -1974,7 +2163,7 @@
       }
 
       // 1. The survey after an agent-mode answer *is* the end-of-turn marker.
-      if (ctx.survey && SiteDriver.hasSurvey() && idleFor >= ctx.surveySettleMs) {
+      if (ctx.survey && this.probe(ctx, 'survey', 500, () => SiteDriver.hasSurvey()) && idleFor >= ctx.surveySettleMs) {
         return { text: ctx.lastText, stopReason: 'survey', stream: summary };
       }
 
@@ -2041,13 +2230,20 @@
     if (!message || !message.kind) return undefined;
     switch (message.kind) {
       case 'ping-content':
-        sendResponse({ ok: true, state: Transport.state, busy: Bridge.busy, url: location.href });
+        // A dormant tab still answers the background's aliveness ping - it is
+        // a fine tab, it just has nothing to bridge.
+        sendResponse({
+          ok: true,
+          state: booted ? Transport.state : 'dormant',
+          busy: booted && Bridge.busy,
+          url: location.href,
+        });
         return false;
       case 'diagnose':
         sendResponse({
           ok: true,
-          state: Transport.state,
-          busy: Bridge.busy,
+          state: booted ? Transport.state : 'dormant',
+          busy: booted && Bridge.busy,
           injected: Boolean(window.__AAB_INJECTED__),
           diag: SiteDriver.diagnose(''),
           config: {
@@ -2058,10 +2254,20 @@
         });
         return false;
       case 'cancel':
-        Bridge.cancelReason = message.reason || 'cancelled';
+        if (booted) Bridge.cancelReason = message.reason || 'cancelled';
         sendResponse({ ok: true });
         return false;
       case 'reconnect':
+        if (!booted) {
+          // A dormant tab cannot be "reconnected"; only wake it when the page
+          // really is the agent page (the popup may target a tab the user
+          // thinks is the bridge tab).
+          if (isAgentPage()) boot();
+          else {
+            sendResponse({ ok: false, dormant: true });
+            return false;
+          }
+        }
         Bridge.cancelReason = null;
         Transport.close();
         Transport.start();
@@ -2070,7 +2276,10 @@
         return false;
       case 'reload-settings':
         UserSettings.reload().then(
-          () => sendResponse({ ok: true, serverUrl: Transport.url() }),
+          () => {
+            if (!booted && isAgentPage()) boot(); // the agent path may have been retargeted
+            sendResponse({ ok: true, serverUrl: Transport.url() });
+          },
           () => sendResponse({ ok: false })
         );
         return true; // async
@@ -2078,20 +2287,6 @@
         return undefined;
     }
   });
-
-  // Keep the MV3 worker alive while long answers stream.
-  try {
-    const port = chrome.runtime.connect({ name: 'aab-keepalive' });
-    setInterval(() => {
-      try {
-        port.postMessage({ kind: 'keepalive', state: Transport.state, busy: Bridge.busy });
-      } catch (_) {
-        /* ignore */
-      }
-    }, 20000);
-  } catch (_) {
-    /* not running inside an extension context (tests) */
-  }
 
   // -------------------------------------------------------------------------
   // boot
@@ -2188,18 +2383,51 @@
       const before = Transport.url();
       await this.load();
       const after = Transport.url();
-      if (after !== before) {
+      // A dormant tab must not open its socket on a settings change: boot()
+      // will pick the new url up when (and if) the page becomes the agent page.
+      if (after !== before && booted) {
         log('server url changed to %s - reconnecting', after);
         Transport.close();
         Transport.start();
       }
-      if (this.ready) Bridge.reportState();
-      Badge.set(Bridge.busy ? 'busy' : Transport.state, Bridge.busy ? 'answering…' : 'bridge: ' + Transport.state);
+      if (this.ready && booted) Bridge.reportState();
+      if (booted) Badge.set(Bridge.busy ? 'busy' : Transport.state, Bridge.busy ? 'answering…' : 'bridge: ' + Transport.state);
       return after;
     },
   };
 
+  /**
+   * Only the agent page is automatable.  The manifest can only match the
+   * whole site (`https://arena.ai/*`), so on every OTHER page the script
+   * stays DORMANT: no WebSocket, no document-wide MutationObserver, no
+   * badge, no page-world stream hook, no timers, no lease claim.  That is
+   * the difference between "an extension is installed" and "an extension is
+   * running" - and it is what used to keep arena.ai (and its memory) heavy
+   * while the user was just reading docs or profile pages.
+   */
+  let booted = false;
+  function isAgentPage() {
+    const prefix = String(CFG.AGENT_PATH || '/agent').replace(/\/+$/, '');
+    if (!prefix) return true;
+    const path = location.pathname || '';
+    return path === prefix || path.startsWith(prefix + '/');
+  }
+
   async function boot() {
+    if (booted) return;
+    if (!isAgentPage()) {
+      log('dormant on a non-agent page:', location.href);
+      watchForAgentPath();
+      return;
+    }
+    booted = true;
+    try {
+      // SPA navigation reached the agent page after load: make sure the hook
+      // re-injected through scripting.executeScript sees the marker too.
+      (document.documentElement || document).setAttribute('data-aab-agent', '1');
+    } catch (_) {
+      /* ignore */
+    }
     if (document.body) Badge.mount();
     else document.addEventListener('DOMContentLoaded', () => Badge.mount(), { once: true });
     await UserSettings.load();
@@ -2211,6 +2439,39 @@
       Bridge.reportState();
       if (ok) log('page hook active (%s)', StreamCapture.hookSource);
     });
+  }
+
+  /**
+   * While dormant, follow client-side (SPA) navigation so a user who opened
+   * `arena.ai/` and then routed to `/agent` still gets the bridge:
+   * pushState/replaceState and popstate are covered immediately, and a slow
+   * 10 s check is the backstop for navigations that fire neither.  A full
+   * page load re-injects the script from the manifest, so this only serves
+   * the in-page case (and costs one string comparison per 10 s while away).
+   */
+  function watchForAgentPath() {
+    if (window.__AAB_PATH_WATCH__) return;
+    window.__AAB_PATH_WATCH__ = true;
+    const check = () => {
+      if (!booted && isAgentPage()) boot();
+    };
+    try {
+      const wrap = (name) => {
+        const original = history[name];
+        if (typeof original !== 'function') return;
+        history[name] = function patchedHistoryMethod() {
+          const result = original.apply(this, arguments);
+          check();
+          return result;
+        };
+      };
+      wrap('pushState');
+      wrap('replaceState');
+      window.addEventListener('popstate', check);
+      setInterval(check, 10000);
+    } catch (_) {
+      /* not a DOM environment (tests) - boot() has already decided */
+    }
   }
 
   window.__AAB__ = {

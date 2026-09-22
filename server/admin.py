@@ -26,6 +26,7 @@ a real API key is enforced, ``/admin/api/*`` asks for the same Bearer token
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -163,6 +164,14 @@ CATALOG: Tuple[Field, ...] = (
         "API key", "کلید API",
         "Shared secret; never shown again after saving (write-only).",
         "کلید مشترک؛ پس از ذخیره دیگر نمایش داده نمی‌شود.",
+    ),
+    Field(
+        "ws_token", "AAB_WS_TOKEN", "secret", "security",
+        "Extension websocket token", "توکن وب‌سوکت اکستینشن",
+        "Optional: the extension must present the same value (extension options → "
+        "Server websocket token) or /ws/browser is rejected. Empty = off.",
+        "اختیاری: اکستینشن باید همین مقدار را بفرستد (گزینه‌های اکستینشن → توکن وب‌سوکت)، "
+        "وگرنه /ws/browser بسته می‌شود. خالی = غیرفعال.",
     ),
 )
 
@@ -322,6 +331,18 @@ def apply_patch(
             field = FIELDS[name]
             value = getattr(settings, name)
             applied[name] = "***" if (field.kind == "secret" and value) else value
+        # Turning on auth while the key is still the default (or empty) would
+        # pin the bridge to the predictable shared secret `sk-arena`: generate
+        # a real one instead.  The generated value is returned ONCE (the secret
+        # field is write-only afterwards) - the panel shows it for copying.
+        if pending.get("require_api_key") is True:
+            if not settings.api_key or settings.api_key == "sk-arena":
+                settings.api_key = secrets.token_urlsafe(24)
+                applied["api_key"] = settings.api_key
+                logging.getLogger("aab.admin").warning(
+                    "generated a new API key (auth enabled with the default key); "
+                    "save it now - it will not be shown again"
+                )
 
     return applied, rejected
 
@@ -456,7 +477,8 @@ def create_admin_router(
     # ------------------------------------------------------------------
     @api.get("/overview")
     async def overview() -> Dict[str, Any]:
-        data = bridge.stats()
+        # The admin API is authenticated, so it keeps the real previews.
+        data = bridge.stats(include_previews=True)
         data.update(
             {
                 "now": time.time(),
@@ -732,12 +754,17 @@ def create_admin_router(
             f"{history.size}/{history.maxlen} entries" if history.enabled else "disabled",
             "set AAB_HISTORY_SIZE=200 to keep a request log for the panel",
         )
-        api_key_ok = not settings.require_api_key or bool(settings.api_key)
+        using_default_key = settings.api_key in ("", "sk-arena")
+        api_key_ok = not settings.require_api_key or (
+            bool(settings.api_key) and not using_default_key
+        )
         add(
             "auth",
             api_key_ok,
             "api key required" if settings.require_api_key else "open (loopback only)",
-            "set AAB_API_KEY when AAB_REQUIRE_API_KEY=1",
+            "the default key 'sk-arena' is predictable - set AAB_API_KEY to a random value"
+            if settings.require_api_key and using_default_key
+            else "set AAB_API_KEY when AAB_REQUIRE_API_KEY=1",
             level="error",
         )
         return {

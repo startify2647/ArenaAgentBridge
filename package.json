@@ -1,6 +1,6 @@
 {
   "name": "arena-agent-bridge-extension-tests",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Dev-only: DOM level tests for the Chrome extension of ArenaAgentBridge",
   "scripts": {

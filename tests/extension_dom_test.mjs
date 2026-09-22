@@ -476,7 +476,7 @@ const FAST_CONFIG = {
   debug: { VERBOSE: false, LOG_LENGTHS: false },
 };
 
-async function createHarness({ site = {}, config = {}, granted = true, scripting = 'ok', loadHook = true } = {}) {
+async function createHarness({ site = {}, config = {}, granted = true, scripting = 'ok', loadHook = true, url = 'https://arena.ai/agent' } = {}) {
   const virtualConsole = new (require('jsdom').VirtualConsole)();
   virtualConsole.on('jsdomError', (error) => {
     // jsdom cannot implement form submission / navigation: expected noise
@@ -487,7 +487,7 @@ async function createHarness({ site = {}, config = {}, granted = true, scripting
   virtualConsole.on('error', (message) => console.error('[page]', message));
 
   const dom = new JSDOM(PAGE_HTML, {
-    url: 'https://arena.ai/agent',
+    url,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
     virtualConsole,
@@ -1262,6 +1262,37 @@ async function main() {
       JSON.stringify(h.window.__AAB__.transport.outbox.length));
     check('the capture flag is cleared after the turn',
       h.window.document.documentElement.getAttribute('data-aab-capture') !== '1');
+    h.close();
+  });
+
+  await test('non-agent pages stay dormant until SPA navigation', async () => {
+    // The whole point of the performance work: on https://arena.ai/* pages
+    // that are NOT the agent page, the content script and the page-world
+    // hook must cost nothing - no socket, no WebSocket/fetch wrapping.
+    const h = await createHarness({ url: 'https://arena.ai/', granted: false });
+    await sleep(200); // give boot() a chance to (incorrectly) connect
+    check('no websocket is opened on a non-agent page', h.ws.sockets.length === 0,
+      String(h.ws.sockets.length));
+    check('the page-world hook does not wrap the page WebSocket',
+      h.window.WebSocket === h.ws.FakeSocket);
+    check('the document is not marked as the agent page',
+      !h.window.document.documentElement.hasAttribute('data-aab-agent'));
+
+    let ping = null;
+    for (const fn of h.window.__testBridge.listeners) {
+      fn({ kind: 'ping-content' }, {}, (reply) => { ping = reply; });
+    }
+    check('a dormant tab still answers aliveness pings',
+      ping && ping.ok === true && ping.state === 'dormant', JSON.stringify(ping));
+
+    // Client-side navigation into the agent area must wake the bridge.  The
+    // lease claim is denied in this harness, so an *awake* bridge settles in
+    // standby (a dormant one would never leave the idle state).
+    h.window.history.pushState({}, '', '/agent');
+    await sleep(300);
+    check('SPA navigation to /agent wakes the bridge',
+      h.window.__AAB__.transport.state === 'standby' || h.ws.sockets.length > 0,
+      h.window.__AAB__.transport.state);
     h.close();
   });
 

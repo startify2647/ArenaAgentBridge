@@ -394,20 +394,37 @@ class BrowserBridge:
     # control surface (admin panel)
     # ------------------------------------------------------------------
     def set_queue_max(self, size: int) -> int:
-        """Resize the waiting queue without dropping what is already in it."""
+        """Resize the waiting queue without dropping what is already in it.
 
-        size = max(1, int(size))
+        Never shrinks below the current depth: a ``maxsize`` smaller than the
+        number of items already queued would wedge every ``put`` forever.
+        """
+
+        size = max(1, int(size), self.queue_depth())
         self._queue._maxsize = size  # noqa: SLF001 - asyncio offers no setter
         self.settings.queue_max_size = size
         return size
 
-    def pending_requests(self) -> List[Dict[str, Any]]:
-        """Everything that is queued or currently typed into the page."""
+    @staticmethod
+    def _mask_preview(text: str) -> str:
+        """A public-safe placeholder for the queued prompt (no content)."""
+
+        return f"… ({len(text or '')} chars, masked)"
+
+    def pending_requests(self, mask_preview: bool = False) -> List[Dict[str, Any]]:
+        """Everything that is queued or currently typed into the page.
+
+        ``mask_preview`` swaps the prompt text for a length-only placeholder -
+        used by the public status endpoint, which anyone on the machine can
+        read.  The authenticated admin API always gets the real preview.
+        """
 
         rows: List[Dict[str, Any]] = []
         for pending in list(self._pending.values()):
             if pending.finished:
                 continue
+            source = pending.conversation or pending.prompt
+            preview = self._mask_preview(source) if mask_preview else source[:400]
             rows.append(
                 {
                     "id": pending.id,
@@ -419,12 +436,42 @@ class BrowserBridge:
                     if pending.browser_duration_ms() is not None
                     else None,
                     "timeout": pending.timeout,
-                    "prompt_preview": (pending.conversation or pending.prompt)[:400],
-                    "prompt_chars": len(pending.conversation or pending.prompt),
+                    "prompt_preview": preview,
+                    "prompt_chars": len(source),
                     "built_chars": len(pending.prompt),
                 }
             )
         return sorted(rows, key=lambda row: row["created_at"])
+
+    async def cancel_by_id(
+        self, request_id: str, reason: str = "cancelled", notify_browser: bool = True
+    ) -> bool:
+        """Cancel ONE queued/in-flight request (its HTTP client gave up).
+
+        The waiting future is resolved with a 499 ``cancelled`` error so the
+        worker moves on, and the page is told to stop when the request was
+        already typed in.  Returns ``True`` when something was cancelled.
+        """
+
+        pending = self._pending.pop(request_id, None)
+        if pending is None or pending.finished:
+            return False
+        pending.finished = True
+        if not pending.future.done():
+            pending.future.set_result(
+                {"error": "cancelled", "response": None,
+                 "meta": {"message": reason, "status_code": 499}}
+            )
+        client = pending.client or self.active_client()
+        if notify_browser and pending.sent_at is not None and client is not None:
+            with contextlib.suppress(Exception):
+                await client.ws.send_json({"type": "cancel", "id": request_id, "reason": reason})
+        if pending.client is not None:
+            pending.client.busy = False
+            if pending.client.state == "answering":
+                pending.client.state = "idle"
+        logger.info("request %s cancelled (%s)", request_id[:8], reason)
+        return True
 
     async def cancel_pending(self, reason: str = "cancelled", notify_browser: bool = True) -> Dict[str, Any]:
         """Fail every queued/in-flight request and tell the page to stop.
@@ -531,10 +578,13 @@ class BrowserBridge:
         mode: str,
         timeout: float,
         conversation: str = "",
+        id_sink: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Enqueue a prompt and wait for the browser answer.
 
-        Raises :class:`BridgeError` on failure.
+        Raises :class:`BridgeError` on failure.  ``id_sink`` (optional) is a
+        dict that receives ``{"id": <request id>}`` as soon as the pending item
+        exists, so a caller racing the event loop can still cancel it by id.
         """
 
         if self._queue.full():
@@ -555,7 +605,21 @@ class BrowserBridge:
             future=loop.create_future(),
         )
         self._pending[pending.id] = pending
-        await self._queue.put(pending)
+        if id_sink is not None:
+            id_sink["id"] = pending.id
+        # Non-blocking: a full queue must fail the request with 429, never
+        # stall the event loop (an awaited ``put`` could block every other
+        # endpoint until a slot frees up).
+        try:
+            self._queue.put_nowait(pending)
+        except asyncio.QueueFull:
+            self._pending.pop(pending.id, None)
+            raise BridgeError(
+                "queue_full",
+                f"the bridge queue is full ({self.settings.queue_max_size} waiting "
+                "requests); retry later or raise AAB_QUEUE_MAX_SIZE",
+                status_code=429,
+            ) from None
         self.total_requests += 1
         self.last_request_at = time.time()
 
@@ -689,6 +753,11 @@ class BrowserBridge:
             if pending is None:
                 self._queue.task_done()
                 continue
+            if pending.finished or pending.future.done():
+                # cancelled/timeout on the HTTP side while queued: skip it
+                # instead of typing the prompt into the page for a dead client
+                self._queue.task_done()
+                continue
             try:
                 await self._dispatch(pending)
             except asyncio.CancelledError:
@@ -797,7 +866,7 @@ class BrowserBridge:
                     await client.ws.send_json({"type": "ping", "ts": time.time()})
 
     # ------------------------------------------------------------------
-    def stats(self) -> Dict[str, Any]:
+    def stats(self, include_previews: bool = True) -> Dict[str, Any]:
         latencies = sorted(self.latencies_ms)
         p50 = latencies[len(latencies) // 2] if latencies else None
         p95 = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
@@ -806,7 +875,7 @@ class BrowserBridge:
                 "version": self.settings.version,
                 "uptime_s": round(time.time() - self.started_at, 1),
                 "pending_requests": len(self._pending),
-                "pending": self.pending_requests(),
+                "pending": self.pending_requests(mask_preview=not include_previews),
                 "queue_depth": self.queue_depth(),
                 "queue_max": self.settings.queue_max_size,
                 "sanitize_mode": self.settings.sanitize_mode,

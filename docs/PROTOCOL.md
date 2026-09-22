@@ -124,10 +124,28 @@ HTTP status + OpenAI error body:
 
 JSON text frames, one message per frame.
 
+### Handshake & authentication (1.4.1+)
+
+The server checks **who** is dialing in, not just **what** they say:
+
+* **Origin check.** A browser socket carries an `Origin` header. The server
+  accepts only the arena.ai tab origin, loopback origins and the extension
+  origin (`chrome-extension://…` / `moz-extension://…`); anything else is
+  rejected **before** the upgrade completes (close code `4403`). This stops a
+  random web page from impersonating the extension, reading queued prompts or
+  injecting forged answers. Non-browser clients (CLI, `curl`, tests) send no
+  `Origin` and are allowed - the server is loopback-only by design. The
+  allowlist is `AAB_WS_ORIGIN_REGEX` (it fails closed on a bad pattern).
+* **Optional shared secret.** With `AAB_WS_TOKEN` set, the client must present
+  the same value - either as `?token=…` in the URL (the extension does this
+  automatically from its *Server websocket token* setting) or inside the
+  `hello` frame (`"token": "…"`). A missing/wrong token gets
+  `{"type":"error","error":"bad_token"}` and close code `4401`.
+
 ### Extension → server
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.3.0","url":"https://arena.ai/agent"}
+{"type":"hello","client":"chrome-extension","version":"1.4.1","url":"https://arena.ai/agent","token":"…"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"text or null","error":null,
@@ -224,6 +242,11 @@ reconnects with a 10 s backoff.
 * If a second arena.ai tab connects and `AAB_SINGLE_CLIENT=1`, the server sends
   `replaced` + close code `4000` to the older one; its in-flight request is
   re-sent to the new tab the same way.
+* When the HTTP client that owns a request goes away (closed SSE stream,
+  aborted request), the server cancels that request on the bridge instead of
+  letting the tab produce an answer nobody wants: the waiting HTTP side sees
+  `499 client_disconnected`, and a `cancel` frame (`reason:
+  client_disconnected`) reaches the page when the prompt was already typed in.
 
 ---
 

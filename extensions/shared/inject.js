@@ -21,6 +21,35 @@
   'use strict';
 
   if (window.__AAB_INJECTED__) return;
+
+  /**
+   * DORMANT ON NON-AGENT PAGES.  The content script runs just before us (same
+   * manifest order, isolated world) and marks the agent page with
+   * `data-aab-agent`; we also accept the current path so runtime re-injection
+   * and tests work without the marker.  On every other arena.ai page we wrap
+   * nothing and announce nothing - wrapping WebSocket/EventSource/fetch there
+   * would tax every single page request for a hook nobody is listening to.
+   *
+   * Note the deliberate order: `__AAB_INJECTED__` is set only AFTER the gate,
+   * so a page that starts dormant can still be fully hooked later (SPA
+   * navigation to /agent triggers a runtime re-injection of this file).
+   */
+  let agentPage = false;
+  try {
+    agentPage = document.documentElement.hasAttribute('data-aab-agent');
+  } catch (_) {
+    /* no DOM yet */
+  }
+  if (!agentPage) {
+    try {
+      const path = location.pathname || '';
+      agentPage = path === '/agent' || path.startsWith('/agent/');
+    } catch (_) {
+      agentPage = true; // cannot tell: keep the old always-on behaviour
+    }
+  }
+  if (!agentPage) return;
+
   window.__AAB_INJECTED__ = true;
 
   const CHANNEL = 'arena-agent-bridge';

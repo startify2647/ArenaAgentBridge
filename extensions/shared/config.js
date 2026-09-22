@@ -19,8 +19,19 @@
     /** Local bridge server (FastAPI). Loopback only - never point this at a remote host. */
     SERVER_WS_URL: 'ws://127.0.0.1:8000/ws/browser',
     SERVER_HTTP_URL: 'http://127.0.0.1:8000',
-    /** Where the content script is allowed to automate. */
+    /**
+     * Optional shared secret for the extension socket: the content script appends
+     * it as `?token=…` and the server (AAB_WS_TOKEN) must accept it.  Empty =
+     * the server's origin check alone decides who may connect.
+     */
+    WS_TOKEN: '',
+    /**
+     * Where the content script is allowed to automate.  On every OTHER
+     * arena.ai page the script stays dormant (no socket, no observers, no
+     * badge) so normal browsing costs (almost) nothing.
+     */
     SITE_MATCH: 'https://arena.ai/agent',
+    AGENT_PATH: '/agent',
 
     /**
      * 'lease'  = the background worker picks ONE arena.ai tab to own the bridge
@@ -169,6 +180,18 @@
 
       /** --- answer capture --------------------------------------------------- */
       POLL_INTERVAL_MS: 300,
+      /**
+       * Adaptive capture tick: while the answer is actively growing the loop
+       * wakes every TICK_FAST_MS (the end of the stream is caught up to half
+       * a second sooner); when it is settled the loop keeps the normal
+       * POLL_INTERVAL_MS rate - but each quiet tick now costs almost nothing
+       * (cached text, cached probes, the fast selector path), which is what
+       * used to make the tab feel heavy while it sat idle.  DOM/stream
+       * events wake the loop early either way.  `false` restores the old
+       * fixed-interval behaviour.
+       */
+      ADAPTIVE_TICK: true,
+      TICK_FAST_MS: 150,
       /** Text unchanged for this long => the answer is finished. */
       STABLE_MS: 3000,
       /** Never accept an answer before this (protects against a 1-token flash). */
@@ -296,7 +319,7 @@
     return base;
   }
 
-  CONFIG.version = '1.4.0';
+  CONFIG.version = '1.4.1';
   CONFIG.VERSION = CONFIG.version; // convenience alias used by the popup / background
 
   // Content scripts, the background worker and the popup all read

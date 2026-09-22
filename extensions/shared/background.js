@@ -57,6 +57,8 @@ async function describeBrowser() {
   }
 }
 
+let lastPersistKey = '';
+
 function persist(extra) {
   const tabs = {};
   for (const [tabId, info] of Object.entries(state.tabs)) {
@@ -76,6 +78,22 @@ function persist(extra) {
     permissions: state.permissions || null,
     ...(extra || {}),
   };
+  // The content script heartbeats every 30 s and the alarm fires every
+  // minute; when nothing meaningful changed, a write to chrome.storage
+  // (and a message to the popup) buys nothing - skip it.  Timestamps are
+  // deliberately NOT part of the key: they change on every call.
+  const key = JSON.stringify([
+    state.owner && state.owner.tabId,
+    Object.keys(state.tabs).sort().map((id) => [id, state.tabs[id].state, state.tabs[id].busy]),
+    state.lastError,
+    state.lastAction,
+    state.answered || 0,
+    state.permissions && state.permissions.granted,
+    state.pageHook && state.pageHook.ready,
+    extra ? JSON.stringify(extra) : '',
+  ]);
+  if (!extra && key === lastPersistKey) return snapshot;
+  lastPersistKey = key;
   try {
     chrome.storage.session.set({ aabState: snapshot });
   } catch (_) {
@@ -149,7 +167,9 @@ async function injectPageHook(tabId) {
 
 /** Firefox MV3 makes host permissions opt-in: report what still needs granting. */
 async function permissionState() {
-  const origins = ['http://127.0.0.1:8000/*', 'https://arena.ai/*'];
+  // Both loopback hosts: the extension's settings accept ws://127.0.0.1 and
+  // ws://localhost alike, so the grant flow must cover both.
+  const origins = ['http://127.0.0.1:8000/*', 'http://localhost:8000/*', 'https://arena.ai/*'];
   try {
     if (!chrome.permissions || !chrome.permissions.contains) return { supported: false, granted: true, origins };
     const granted = await chrome.permissions.contains({ origins });

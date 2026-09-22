@@ -117,12 +117,24 @@ async def test_require_api_key_can_be_toggled_from_the_panel(api):
     app, client = api
     assert (await client.get("/v1/models")).status_code == 200
     response = await client.post("/admin/api/settings", json={"patch": {"require_api_key": True}})
-    assert response.json()["applied"]["require_api_key"] is True
+    body = response.json()
+    assert body["applied"]["require_api_key"] is True
     assert app.state.settings.require_api_key is True
     assert (await client.get("/v1/models")).status_code == 401
+    # Enabling auth while the key is still the predictable default must NOT
+    # pin the bridge to `sk-arena`: the server generates a real key and hands
+    # it to the panel exactly once (the field itself stays write-only).
+    generated = body["applied"].get("api_key") or app.state.settings.api_key
+    assert generated and generated != "sk-arena"
+    assert (
+        await client.get("/v1/models", headers={"Authorization": f"Bearer {generated}"})
+    ).status_code == 200
     assert (
         await client.get("/v1/models", headers={"Authorization": "Bearer sk-arena"})
-    ).status_code == 200
+    ).status_code == 401
+    # ...and the stored value is masked in the settings payload
+    assert body["values"]["api_key"] == "***"
+    assert body["values"]["api_key_set"] is True
 
 
 # ---------------------------------------------------------------------------

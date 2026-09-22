@@ -41,6 +41,12 @@
       help: 'Used for the "admin panel" button and the quick test.', help_fa: 'برای دکمهٔ پنل مدیریت و آزمون سریع.',
     },
     {
+      path: 'WS_TOKEN', group: 'connection', type: 'text',
+      label: 'Server websocket token', label_fa: 'توکن وب‌سوکت سرور',
+      help: 'Optional: must equal AAB_WS_TOKEN on the server, else the socket is refused. Empty = off.',
+      help_fa: 'اختیاری: باید با AAB_WS_TOKEN سرور یکی باشد، وگرنه اتصال بسته می‌شود. خالی = غیرفعال.',
+    },
+    {
       path: 'TRANSPORT_MODE', group: 'connection', type: 'enum', choices: ['lease', 'direct'],
       label: 'Tab ownership', label_fa: 'مالکیت تب',
       help: 'lease = one tab owns the bridge, direct = every tab connects',

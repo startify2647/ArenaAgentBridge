@@ -23,6 +23,7 @@ import json
 import logging
 import sys
 import time
+import urllib.parse
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -130,6 +131,39 @@ def _dump_messages(payload: ChatCompletionRequest, limit: int = 4000) -> str:
     return "\n".join(lines)[:limit]
 
 
+async def submit_with_disconnect_watch(
+    bridge: BrowserBridge,
+    prompt: str,
+    mode: str,
+    timeout: float,
+    *,
+    conversation: str,
+    is_disconnected,
+) -> tuple:
+    """Await ``bridge.submit`` while watching the HTTP client connection.
+
+    Returns ``(result, aborted)``.  ``aborted`` is ``True`` when the client
+    went away mid-flight: the request has been cancelled on the bridge so the
+    browser tab is not burned producing an answer nobody is waiting for.
+    """
+
+    pending_id: Dict[str, str] = {}
+    task = asyncio.create_task(
+        bridge.submit(prompt, mode, timeout, conversation=conversation, id_sink=pending_id)
+    )
+    try:
+        while not task.done():
+            done_set, _ = await asyncio.wait({task}, timeout=0.3)
+            if not done_set and await is_disconnected():
+                if pending_id.get("id"):
+                    await bridge.cancel_by_id(pending_id["id"], reason="client_disconnected")
+                return None, True
+        return await task, False
+    finally:
+        if not task.done():
+            task.cancel()
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or get_settings()
     bridge = BrowserBridge(settings)
@@ -161,6 +195,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             "via a Manifest V3 extension. Loopback only, no API keys, no captcha bypass."
         ),
         lifespan=lifespan,
+        # /docs + /openapi.json are disabled by AAB_DOCS=0 (default: on, the
+        # server is loopback-only).
+        docs_url="/docs" if settings.docs_enabled else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
     )
     app.state.settings = settings
     app.state.bridge = bridge
@@ -287,7 +326,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
 
         try:
-            result = await bridge.submit(prompt, mode, timeout, conversation=conversation)
+            result, aborted = await submit_with_disconnect_watch(
+                bridge, prompt, mode, timeout,
+                conversation=conversation, is_disconnected=request.is_disconnected,
+            )
+            if aborted:
+                logger.info("client disconnected, request %s cancelled", request_id[:8])
+                history.record(
+                    request_id=request_id,
+                    source=source,
+                    client=client_label,
+                    model=payload.model or settings.model_id,
+                    mode=mode,
+                    streamed=False,
+                    status="aborted",
+                    http_status=499,
+                    error_code="client_disconnected",
+                    error_message="the client closed the connection while the page was answering",
+                    prompt=conversation,
+                    built_chars=len(prompt),
+                    total_ms=int((time.time() - started) * 1000),
+                )
+                return _error(499, "client disconnected", err_type="client_error",
+                             code="client_disconnected")
         except BridgeError as exc:
             logger.warning("request failed: %s (%s)", exc.code, exc.message)
             history.record(
@@ -398,7 +459,50 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
             yield _sse(first.model_dump(exclude_none=True))
 
-            result = await bridge.submit(prompt, mode, timeout, conversation=conversation)
+            # The client may already be gone (curl --max-time, an aborted
+            # fetch): do not burn the browser tab on a dead conversation.
+            if await is_disconnected():
+                logger.info("client disconnected before submit %s", request_id[:8])
+                history.record(
+                    request_id=request_id,
+                    source=source,
+                    client=client_label,
+                    model=model,
+                    mode=mode,
+                    streamed=True,
+                    status="aborted",
+                    http_status=499,
+                    error_code="client_disconnected",
+                    error_message="the client closed the stream before the request was submitted",
+                    prompt=conversation,
+                    built_chars=len(prompt),
+                    total_ms=int((time.time() - started) * 1000),
+                )
+                return
+
+            result, aborted = await submit_with_disconnect_watch(
+                bridge, prompt, mode, timeout,
+                conversation=conversation, is_disconnected=is_disconnected,
+            )
+            if aborted:
+                logger.info("client disconnected, request %s cancelled", request_id[:8])
+                history.record(
+                    request_id=request_id,
+                    source=source,
+                    client=client_label,
+                    model=model,
+                    mode=mode,
+                    streamed=True,
+                    status="aborted",
+                    http_status=499,
+                    error_code="client_disconnected",
+                    error_message="the client closed the stream while the page was answering",
+                    prompt=conversation,
+                    built_chars=len(prompt),
+                    total_ms=int((time.time() - started) * 1000),
+                )
+                return
+
             answer = (result.get("response") or "")[: settings.max_response_chars]
             sanitized_text, report = sanitize(
                 answer, mode="off" if no_sanitize else settings.sanitize_mode, rules=rules
@@ -521,8 +625,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/v1/bridge/status")
     @app.get("/bridge/status", include_in_schema=False)
-    async def status() -> Dict[str, Any]:
-        data = bridge.stats()
+    async def status(_: None = Depends(require_auth)) -> Dict[str, Any]:
+        # Prompt previews only for authenticated callers (the OpenAI-style
+        # surface and the admin API share the same token): the public view
+        # must not leak queued prompts to any page on the machine.
+        data = bridge.stats(include_previews=settings.require_api_key)
         data["history"] = history.summary()
         data["panel"] = {"enabled": settings.panel_enabled, "url": "/admin"}
         data["settings"] = {
@@ -580,6 +687,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ------------------------------------------------------------------
     @app.websocket("/ws/browser")
     async def ws_browser(ws: WebSocket) -> None:
+        # Who is this?  A browser tab always sends an ``Origin``; the content
+        # script runs inside arena.ai, so its socket carries the tab origin.
+        # Anything else - a random web page speaking the protocol - is
+        # rejected *before* the handshake.  Non-browser clients (CLI, curl,
+        # tests) send no Origin and are allowed: the server is loopback-only.
+        origin = (ws.headers.get("origin") or "").strip()
+        if not settings.ws_origin_allowed(origin):
+            logger.warning("rejecting /ws/browser from foreign origin %r", origin)
+            await ws.close(code=4403)
+            return
+
+        # Optional shared secret (AAB_WS_TOKEN): presented as ?token=… in the
+        # URL or inside the hello frame.  Checked after accept, because the
+        # token may travel in the first frame.
+        ws_token_presented: Optional[str] = None
+        with contextlib.suppress(Exception):
+            parsed = urllib.parse.urlsplit(str(ws.url))
+            ws_token_presented = urllib.parse.parse_qs(parsed.query).get("token", [None])[0]
+
         await ws.accept()
         client = None
         try:
@@ -596,6 +722,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     return
                 if not isinstance(first, dict):
                     continue
+                if settings.ws_token:
+                    presented = ws_token_presented
+                    if presented is None and first.get("type") == "hello":
+                        presented = first.get("token")
+                    if presented != settings.ws_token:
+                        logger.warning("rejecting /ws/browser: bad or missing token")
+                        await ws.send_json({"type": "error", "error": "bad_token"})
+                        await ws.close(code=4401)
+                        return
                 client = await bridge.connect(ws, first if first.get("type") == "hello" else {})
                 await bridge.handle_message(client, first)
 
@@ -621,9 +756,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                       if exc.status_code == 401 else "invalid_request_error")
 
     @app.exception_handler(Exception)
-    async def unhandled_exception_handler(_: Request, exc: Exception):
-        logger.exception("unhandled error: %s", exc)
-        return _error(500, f"internal bridge error: {exc}", err_type="server_error")
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        # The exception text (and its traceback) is logged on the server, never
+        # echoed to the client: it can carry settings, paths or other secrets.
+        logger.exception("unhandled error %s %s: %s", request.method, request.url.path, exc)
+        return _error(500, "internal bridge error - see the server logs", err_type="server_error",
+                      code="internal_error")
 
     return app
 

@@ -25,7 +25,7 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
-**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.4.0`
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.4.1`
 
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
@@ -48,6 +48,7 @@ touches cookies, and never stores credentials.
 - [Troubleshooting](#troubleshooting)
 - [Security model](#security-model)
 - [Limitations](#limitations)
+- [Changelog](#changelog)
 - [Project layout](#project-layout)
 - [Development](#development)
 - [Legal & safety](#legal--safety)
@@ -66,6 +67,10 @@ touches cookies, and never stores credentials.
    observation is event-driven and incremental (each stream frame is parsed
    once), and while no request runs the extension leaves the page's traffic
    alone, so it stays light on the browser.
+   On every arena.ai page that is **not** the agent page the extension stays
+   fully dormant (no socket, no observers, no page traffic wrapping), and
+   during a capture it only re-reads the answer when the page actually
+   changed it - so an idle tab costs (almost) nothing.
 5. The answer travels back to the server, is passed through the destructive-command
    sanitiser, and is returned as `chat.completion` JSON (or as an SSE stream).
    Delivery is guaranteed across socket blinks: undelivered answers wait in a
@@ -235,8 +240,10 @@ over the file. The important knobs:
 
 Extension: everything site-specific lives in
 [`extensions/shared/config.js`](extensions/shared/config.js) - selectors, stability
-thresholds, SSE prefixes, debug flags. You can override values live from the page
-console:
+thresholds, SSE prefixes, debug flags. You can override values live from DevTools
+- the content script runs in the extension's *isolated world*, so first switch the
+console's context dropdown (top of the Console panel) to the extension entry,
+then:
 
 ```js
 __AAB_CONFIG__.selectors.input.unshift('textarea.my-new-class');
@@ -347,9 +354,21 @@ sanitiser false positives, Firefox permission quirks):
 ## Security model
 
 * **Loopback only.** Default bind is `127.0.0.1`; CORS allows only extension
-  origins, `localhost` and the site itself. Do not expose it - by default the API
-  accepts any Bearer token, because the security boundary is "only this machine
-  can connect".
+  origins, `localhost` *on the server's own port* and the site itself. Do not
+  expose it - by default the API accepts any Bearer token, because the security
+  boundary is "only this machine can connect".
+* **The extension socket is identity-checked.** `/ws/browser` rejects any
+  `Origin` that is not the arena.ai tab, loopback or the extension origin
+  (close code 4403), so a random web page cannot impersonate the extension,
+  read queued prompts or inject forged answers. Non-browser clients (CLI,
+  curl) send no Origin and are allowed. Optionally, set `AAB_WS_TOKEN` and the
+  same value in the extension (options → *Server websocket token*): the socket
+  is then only opened for a matching `?token=…` / hello frame (4401 otherwise).
+* **No prompt leakage from public endpoints.** `/v1/bridge/status` shows only a
+  length placeholder for queued prompts; the real preview is visible to the
+  authenticated admin API (and to callers with the API key when auth is on).
+* **The server never echoes its own internals.** Unhandled errors return a
+  generic 500 body; the exception detail goes to the server log only.
 * **No credentials.** No cookies, tokens or profiles are read, stored or
   forwarded. The extension uses your existing browser session, nothing else. The
   server holds prompts in memory only.
@@ -366,7 +385,9 @@ sanitiser false positives, Firefox permission quirks):
   three host origins (arena.ai + loopback). No `cookies`, no `webRequest`, no
   `<all_urls>`, no `eval`, no analytics.
 * **Optional auth.** `AAB_REQUIRE_API_KEY=1` + `AAB_API_KEY=…` enforces a Bearer
-  token (useful on shared machines).
+  token (useful on shared machines). Enabling it from the admin panel while the
+  key is still the default placeholder generates a real random key and shows it
+  to you once (the field is write-only afterwards).
 
 ## Limitations
 
@@ -384,6 +405,33 @@ sanitiser false positives, Firefox permission quirks):
   limits; `RESET_BEFORE_REQUEST = true` starts fresh per request.
 * **Image/audio input is dropped** (`[image omitted by bridge]`).
 * **Attachments, files and site tools can't be driven** by the bridge.
+
+## Changelog
+
+**1.4.1** - security + weight:
+
+* `/ws/browser` now checks the `Origin` header (4403 for foreign pages) and
+  supports an optional shared secret `AAB_WS_TOKEN` (4401 without it), so a web
+  page can no longer impersonate the extension.
+* `/v1/bridge/status` no longer leaks queued prompt previews (length-only
+  placeholder; authenticated callers get the real text).
+* A request whose HTTP client disconnects is cancelled on the bridge
+  (`499`), so the browser tab is not burned on a dead conversation.
+* Admin panel: enabling API-key auth with the default key generates a real
+  random key (shown once); selfcheck flags the predictable default; the queue
+  can no longer be shrunk below its current depth; the queue never blocks the
+  event loop.
+* Sanitiser: `crontab -l`/`-e` are no longer flagged, profile appends (`>>
+  ~/.bashrc`) are reported but not rewritten, `chmod`/`chown` 777 detection
+  covers `/etc`, `/usr`, `/var`, `/boot`, `/home`, `~`.
+* OpenAPI docs are behind `AAB_DOCS=0`; CORS defaults to the server's own port.
+* Extension is much lighter: dormant on non-agent arena.ai pages (SPA
+  navigation still wakes it), the page-world hook wraps nothing on non-agent
+  pages, the capture loop ticks adaptively and re-reads answer text only on
+  real changes, page probes (stop/survey/captcha/login) are cached per
+  request, state heartbeats and `chrome.storage` writes are deduplicated, and
+  the keepalive port is open only while a request runs.
+* Outbox TTL now mirrors the server's worker margin (timeout + 20 s).
 
 ## Project layout
 

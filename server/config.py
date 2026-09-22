@@ -9,6 +9,7 @@ hard timeout protects against a hung browser tab.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -115,13 +116,24 @@ class Settings:
     # --- network -----------------------------------------------------------
     host: str = "127.0.0.1"
     port: int = 8000
-    #: Regex of allowed browser ``Origin`` headers for the HTTP API.  The Chrome
+    #: Regex of allowed browser ``Origin`` headers for the HTTP API.  The
     #: extension talks over ``chrome-extension://`` and the CLI tooling over
-    #: loopback, anything else is rejected.
+    #: loopback, anything else is rejected.  ``from_env`` narrows the loopback
+    #: part to the port the server actually listens on.
     cors_origin_regex: str = (
         r"^(chrome-extension://[a-z0-9]{5,64}|moz-extension://[0-9a-f-]{6,64}"
         r"|http://(localhost|127\.0\.0\.1)(:\d+)?"
         r"|https://[a-z0-9-]+\.arena\.ai)$"
+    )
+    #: Regex of allowed ``Origin`` headers for the extension WebSocket
+    #: (``/ws/browser``).  The content script runs inside the arena.ai tab, so
+    #: its socket carries the tab's origin; CLI/dev clients send no Origin at
+    #: all (or a loopback one) and are allowed.  Anything else - e.g. a random
+    #: web page speaking the protocol - is rejected.
+    ws_origin_regex: str = (
+        r"^(https://([a-z0-9-]+\.)*arena\.ai(:\d+)?"
+        r"|http://(localhost|127\.0\.0\.1)(:\d+)?"
+        r"|chrome-extension://|moz-extension://)"
     )
 
     # --- auth --------------------------------------------------------------
@@ -130,6 +142,11 @@ class Settings:
     #: ``AAB_API_KEY=...`` to enforce a real shared secret.
     require_api_key: bool = False
     api_key: str = "sk-arena"
+    #: Optional shared secret for the extension WebSocket.  When set, the
+    #: extension must present it (query param ``?token=`` or in its ``hello``
+    #: frame) or the socket is closed with 4401.  The OpenAI-style HTTP API is
+    #: NOT gated by this - it stays behind ``require_api_key``.
+    ws_token: str = ""
 
     # --- request handling --------------------------------------------------
     request_timeout: float = 300.0
@@ -179,12 +196,16 @@ class Settings:
     panel_refresh_ms: int = 2000
     #: How many completed requests the panel keeps in RAM (0 = no history).
     history_size: int = 200
+    #: Expose the OpenAPI docs (``/docs``, ``/openapi.json``).  The server is
+    #: loopback-only, so this is convenience, not exposure - but a machine that
+    #: ever binds the bridge to a wider interface should turn it off.
+    docs_enabled: bool = True
 
     # --- misc --------------------------------------------------------------
     log_level: str = "INFO"
     log_json: bool = False
     stats_window: int = 50
-    version: str = "1.4.0"
+    version: str = "1.4.1"
 
     model_ids: List[str] = field(default_factory=list)
 
@@ -197,12 +218,21 @@ class Settings:
         # An instance carries the real default values (dataclass `field(...)`
         # descriptors on the class are not the values themselves).
         d = cls()
+        port = _env_int("PORT", d.port)
+        # Default CORS only for the port we actually listen on (an old
+        # `localhost:9000` tab must not be able to read `localhost:8000`).
+        cors_default = (
+            r"^(chrome-extension://[a-z0-9]{5,64}|moz-extension://[0-9a-f-]{6,64}"
+            r"|http://(localhost|127\.0\.0\.1):" + str(port) + "(?::80)?"
+            r"|https://[a-z0-9-]+\.arena\.ai)$"
+        )
         settings = cls(
             host=_env("HOST", d.host) or d.host,
-            port=_env_int("PORT", d.port),
-            cors_origin_regex=_env("CORS_ORIGIN_REGEX", d.cors_origin_regex) or d.cors_origin_regex,
+            port=port,
+            cors_origin_regex=_env("CORS_ORIGIN_REGEX", cors_default) or cors_default,
             require_api_key=_env_bool("REQUIRE_API_KEY", d.require_api_key),
             api_key=_env("API_KEY", d.api_key) or d.api_key,
+            ws_token=_env("WS_TOKEN", d.ws_token) or "",
             request_timeout=_env_float("REQUEST_TIMEOUT", d.request_timeout),
             min_request_timeout=_env_float("MIN_REQUEST_TIMEOUT", d.min_request_timeout),
             max_request_timeout=_env_float("MAX_REQUEST_TIMEOUT", d.max_request_timeout),
@@ -225,6 +255,8 @@ class Settings:
             panel_enabled=_env_bool("PANEL_ENABLED", d.panel_enabled),
             panel_refresh_ms=_env_int("PANEL_REFRESH_MS", d.panel_refresh_ms),
             history_size=_env_int("HISTORY_SIZE", d.history_size),
+            docs_enabled=_env_bool("DOCS", d.docs_enabled),
+            ws_origin_regex=_env("WS_ORIGIN_REGEX", d.ws_origin_regex) or d.ws_origin_regex,
             single_client=_env_bool("SINGLE_CLIENT", d.single_client),
             heartbeat_interval=_env_float("HEARTBEAT_INTERVAL", d.heartbeat_interval),
             client_hello_timeout=_env_float("CLIENT_HELLO_TIMEOUT", d.client_hello_timeout),
@@ -266,6 +298,24 @@ class Settings:
             self.history_size = 0
         if self.history_size > 5000:
             self.history_size = 5000
+        # Compile the websocket-origin allowlist once; an invalid pattern
+        # fails *closed* (every Origin is rejected, empty ones stay allowed).
+        try:
+            self._ws_origin_re = re.compile(self.ws_origin_regex, re.IGNORECASE)  # type: ignore[attr-defined]
+        except re.error:
+            self._ws_origin_re = re.compile(r"^$")  # type: ignore[attr-defined]
+
+    def ws_origin_allowed(self, origin: Optional[str]) -> bool:
+        """May this ``Origin`` open the extension WebSocket?
+
+        Empty/missing origins are allowed: the CLI, ``curl`` and dev tooling
+        (and non-browser test clients) do not send one, and the server is
+        loopback-only by design.  Everything else must match the allowlist.
+        """
+
+        if not origin:
+            return True
+        return bool(self._ws_origin_re.match(origin.strip().rstrip("/")))
 
     # ------------------------------------------------------------------
     def clamp_timeout(self, value: Optional[float]) -> float:
