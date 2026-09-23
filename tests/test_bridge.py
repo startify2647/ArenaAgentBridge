@@ -191,6 +191,24 @@ async def test_health_and_status_endpoints(api):
     assert (await client.get("/")).status_code == 200
 
 
+async def test_head_probes_are_answered_not_405(api):
+    """Hermes probes a custom endpoint with `curl -I` (HEAD) before trusting
+    it; the GET-only routes answered 405 Method Not Allowed and the client
+    marked the whole bridge as unreachable."""
+    _, client = api
+    for path in ("/v1/models", "/models", "/healthz", "/readyz", "/v1/bridge/status", "/"):
+        response = await client.head(path)
+        assert response.status_code != 405, path
+        assert response.status_code in (200, 503), (path, response.status_code)
+    head = await client.head("/v1/models")
+    # HEAD = GET headers without the body (what `curl -I` inspects)
+    assert head.content == b""
+    assert "application/json" in head.headers.get("content-type", "")
+    assert head.headers.get("content-length") is not None
+    assert "GET" in head.headers.get("allow", "GET") or head.status_code == 200
+    assert (await client.get("/v1/models")).status_code == 200
+
+
 async def test_chat_completion_roundtrip(api):
     app, client = api
     browser = await attach_browser(app, plain_answer("# Hello\n\nworld"))

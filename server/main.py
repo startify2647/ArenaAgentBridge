@@ -29,6 +29,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 
 from .admin import create_admin_router, render_panel_page
 from .auth import api_key_dependency
@@ -762,6 +763,32 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         logger.exception("unhandled error %s %s: %s", request.method, request.url.path, exc)
         return _error(500, "internal bridge error - see the server logs", err_type="server_error",
                       code="internal_error")
+
+    # ------------------------------------------------------------------
+    # HEAD twins for every GET route
+    # ------------------------------------------------------------------
+    # Clients like Hermes validate a custom endpoint with `curl -I` (HEAD)
+    # before trusting it; a GET-only route answers 405 and the client marks
+    # the whole bridge as unreachable.  Registered as separate, schema-hidden
+    # routes - an `api_route(methods=["GET", "HEAD"])` would trip FastAPI's
+    # duplicate-operation-id warning (one route = one operation id).
+    for route in list(app.router.routes):
+        if not isinstance(route, APIRoute) or "GET" not in route.methods or "HEAD" in route.methods:
+            continue
+        app.add_api_route(
+            route.path,
+            route.endpoint,
+            methods=["HEAD"],
+            response_model=route.response_model,
+            status_code=route.status_code,
+            response_class=route.response_class,
+            dependencies=list(route.dependencies),
+            name=f"{route.name}_head",
+            include_in_schema=False,
+            response_model_exclude_unset=route.response_model_exclude_unset,
+            response_model_exclude_defaults=route.response_model_exclude_defaults,
+            response_model_exclude_none=route.response_model_exclude_none,
+        )
 
     return app
 
