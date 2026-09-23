@@ -624,6 +624,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ------------------------------------------------------------------
     # status / diagnostics
     # ------------------------------------------------------------------
+    # The bare `/v1` prefix has no OpenAI counterpart, but clients (and
+    # humans opening the base URL in a browser) probe it - answer with a
+    # small index instead of FastAPI's 404 "Not Found".
+    @app.get("/v1", include_in_schema=False)
+    async def v1_root() -> Dict[str, Any]:
+        return {
+            "object": "api",
+            "message": "ArenaAgentBridge - local OpenAI-compatible bridge to the arena.ai web UI",
+            "models": "/v1/models",
+            "chat": "/v1/chat/completions",
+            "status": "/v1/bridge/status",
+        }
+
+    @app.get("/v1/", include_in_schema=False)
+    async def v1_root_slash() -> Dict[str, Any]:
+        return await v1_root()
+
     @app.get("/v1/bridge/status")
     @app.get("/bridge/status", include_in_schema=False)
     async def status(_: None = Depends(require_auth)) -> Dict[str, Any]:
