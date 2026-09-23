@@ -94,20 +94,39 @@ class FakeSite {
 
     const doc = this.window.document;
     const user = doc.createElement('div');
-    if (this.options.hideMessages) {
+    const assistant = doc.createElement('div');
+    if (this.options.arenaMarkup) {
+      // the real arena.ai/agent transcript markup: [data-agent-transcript-message]
+      // wraps every turn; user turns add [data-user-message-layout], assistant
+      // turns animate words in [data-agent-word] spans.
+      user.setAttribute('data-agent-transcript-message', 'true');
+      user.setAttribute('data-chat-message-id', `u-${this.submitted.length}`);
+      const layout = doc.createElement('div');
+      layout.setAttribute('data-user-message-layout', 'true');
+      const row = doc.createElement('div');
+      row.setAttribute('data-user-message-body-row', 'true');
+      const bubble = doc.createElement('div');
+      bubble.className = 'prose';
+      const line = doc.createElement('p');
+      line.textContent = prompt;
+      bubble.appendChild(line);
+      row.appendChild(bubble);
+      layout.appendChild(row);
+      user.appendChild(layout);
+      assistant.setAttribute('data-agent-transcript-message', 'true');
+      assistant.setAttribute('data-chat-message-id', `a-${this.submitted.length}`);
+    } else if (this.options.hideMessages) {
       // markup changed: no role attributes and hashed, meaningless class names
       // (what a real redesign looks like - nothing matches a selector)
       user.className = 'v2_row v2_you';
       user.textContent = prompt;
+      assistant.className = 'v2_row v2_ai';
     } else {
       user.setAttribute('data-message-author-role', 'user');
       user.textContent = prompt;
+      assistant.setAttribute('data-message-author-role', 'assistant');
     }
     doc.getElementById('chat').appendChild(user);
-
-    const assistant = doc.createElement('div');
-    if (this.options.hideMessages) assistant.className = 'v2_row v2_ai';
-    else assistant.setAttribute('data-message-author-role', 'assistant');
     doc.getElementById('chat').appendChild(assistant);
 
     const stop = doc.createElement('button');
@@ -1115,6 +1134,61 @@ async function main() {
     h.close();
   });
 
+  await test('a survey with no captured text fails loudly instead of returning empty', async () => {
+    // Regression: a visible end-of-turn survey (or a feedback widget that
+    // matches the survey selectors) used to end the capture even when nothing
+    // was read from the DOM or the stream - clients received a silent empty
+    // "success" (`(empty)` on the wire) instead of an answer or an error.
+    const h = await createHarness({
+      site: { neverAnswers: true, keepStop: true, survey: false },
+      config: {
+        behavior: {
+          ...FAST_CONFIG.behavior,
+          START_CONFIRM_MS: 300,
+          IDLE_STALL_MS: 30000,
+          NO_OUTPUT_MS: 30000,
+          SURVEY_SETTLE_MS: 100,
+        },
+      },
+    });
+    h.site.showSurvey(); // a leftover / false-positive poll is already on screen
+    const reply = await request(h, { prompt: 'why is my answer empty?', mode: 'agent' });
+    check('the failure is explicit', reply.error === 'empty_answer', JSON.stringify(reply));
+    check('no silent empty success body', !reply.response, JSON.stringify(reply.response));
+    h.close();
+  });
+
+  await test('the survey does not cut a stream that is still arriving', async () => {
+    // The old survey branch returned `ctx.lastText` only: a survey (or a
+    // feedback widget matching the survey selectors) that appeared while the
+    // site's own stream was still delivering text ended the turn with a
+    // silent empty answer and dropped the frames already captured.
+    const h = await createHarness({
+      site: { hideMessages: true, keepStop: true, survey: false, neverAnswers: true },
+      config: {
+        behavior: {
+          ...FAST_CONFIG.behavior,
+          SSE_IDLE_MS: 500,
+          START_CONFIRM_MS: 4000,
+          IDLE_STALL_MS: 30000,
+          NO_OUTPUT_MS: 30000,
+          SURVEY_SETTLE_MS: 100,
+        },
+      },
+    });
+    h.site.showSurvey(); // the (false-positive) survey is up before anything arrived
+    const promise = request(h, { prompt: 'slow stream, do not cut me', mode: 'agent' });
+    await sleep(60);
+    h.site.emitStreamFrame('a0:{"type":"text","text":"slow "}');
+    await sleep(150);
+    h.site.emitStreamFrame('a0:{"type":"text","text":"stream"}');
+    const reply = await promise;
+    check('the streamed text is returned', (reply.response || '').includes('slow stream'), JSON.stringify(reply.response));
+    check('the turn was not cut by the survey', reply.meta.stop_reason !== 'survey', JSON.stringify(reply.meta.stop_reason));
+    check('it is marked as coming from the stream', reply.meta.from_stream === true, JSON.stringify(reply.meta.from_stream));
+    h.close();
+  });
+
   await test('a frozen site is reported as a stoppage, not a hang', async () => {
     const h = await createHarness({
       site: { neverAnswers: true, keepStop: true, survey: false },
@@ -1221,6 +1295,20 @@ async function main() {
       ['stable', 'stalled', 'timeout_partial'].includes(reply.meta.stop_reason), JSON.stringify(reply.meta.stop_reason));
     check('the capture flag is cleared after the turn',
       h.window.document.documentElement.getAttribute('data-aab-capture') !== '1');
+    h.close();
+  });
+
+  await test('arena transcript markup: assistant turns are read, user turns are not', async () => {
+    // Regression for the 2026-09 arena.ai DOM: no data-testid / role attrs at
+    // all - turns are [data-agent-transcript-message] nodes and user turns wrap
+    // their body in [data-user-message-layout].  The old selectors matched
+    // nothing and every answer came back empty.
+    const h = await createHarness({ site: { arenaMarkup: true } });
+    const reply = await request(h, { mode: 'agent', prompt: 'read my transcript markup please' });
+    check('the assistant turn is captured', (reply.response || '').includes('Hello **world**'), JSON.stringify(reply.response));
+    check('the user turn is not echoed back', !(reply.response || '').includes('read my transcript markup'), JSON.stringify(reply.response));
+    check('action buttons are not part of the text', !/Copy|More options/.test(reply.response || ''), JSON.stringify(reply.response));
+    check('the turn completed', ['survey', 'stable', 'sse_idle', 'sse_done', 'stalled'].includes(reply.meta.stop_reason), JSON.stringify(reply.meta.stop_reason));
     h.close();
   });
 

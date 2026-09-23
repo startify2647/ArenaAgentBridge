@@ -722,6 +722,13 @@ class BrowserBridge:
                 "site; run Diagnose DOM (popup) and update extensions/shared/config.js",
                 504,
             ),
+            "empty_answer": (
+                "empty_answer",
+                "the turn finished (the post-answer survey was visible) but no answer "
+                "text could be captured - the site's markup or stream format probably "
+                "changed; run Diagnose DOM (popup) and update extensions/shared/config.js",
+                502,
+            ),
             "site_idle": (
                 "page_timeout",
                 "the arena.ai tab (and its own stream) stopped changing while the "

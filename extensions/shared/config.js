@@ -48,6 +48,7 @@
     selectors: {
       /** The prompt box. First visible hit wins. */
       input: [
+        'textarea[name="message"]',
         '[data-testid="chat-input"]',
         '[data-testid="prompt-input"]',
         'form textarea',
@@ -85,12 +86,16 @@
       ],
       /** Every message, when the site exposes a role attribute. */
       messageRoleAny: [
+        '[data-agent-transcript-message]',
         '[data-message-author-role]',
         '[data-role="assistant"], [data-role="user"]',
         '.message[data-author]',
       ],
       /** Assistant messages, most specific first. */
       assistantMessage: [
+        // arena.ai agent transcript: every turn is [data-agent-transcript-message];
+        // roleOf() keeps only the turns WITHOUT [data-user-message-layout].
+        '[data-agent-transcript-message]',
         '[data-message-author-role="assistant"]',
         '[data-role="assistant"]',
         '[data-author="assistant"]',

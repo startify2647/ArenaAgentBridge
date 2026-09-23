@@ -860,6 +860,15 @@
     },
 
     roleOf(el) {
+      // arena.ai agent transcript markup: every turn is a
+      // `[data-agent-transcript-message]` node (`data-chat-message-id`); user
+      // turns wrap their body in `[data-user-message-layout]` /
+      // `[data-user-message-body-row]`, assistant turns do not (their text is
+      // animated in through `[data-agent-word]` spans).
+      if (el.querySelector && el.querySelector('[data-user-message-layout], [data-user-message-body-row]')) {
+        return 'user';
+      }
+      if (el.hasAttribute && el.hasAttribute('data-agent-transcript-message')) return 'assistant';
       const attr =
         el.getAttribute('data-message-author-role') ||
         el.getAttribute('data-role') ||
@@ -2134,6 +2143,7 @@
       const stopVisible = Boolean(this.probe(ctx, 'stop', 300, () => SiteDriver.findStopButton()));
       const idleFor = Date.now() - ctx.stableSince;
       const streamIdle = summary.lastAt ? Date.now() - summary.lastAt : null;
+      const streamActive = Boolean(summary.lastAt && !summary.sawDone && streamIdle !== null && streamIdle < ctx.sseIdleMs);
       const silentFor = Date.now() - ctx.lastChangeAt;
 
       // Activity = the DOM grew *or* the site's own stream sent a frame.  This
@@ -2163,8 +2173,37 @@
       }
 
       // 1. The survey after an agent-mode answer *is* the end-of-turn marker.
-      if (ctx.survey && this.probe(ctx, 'survey', 500, () => SiteDriver.hasSurvey()) && idleFor >= ctx.surveySettleMs) {
-        return { text: ctx.lastText, stopReason: 'survey', stream: summary };
+      //    Never end the turn on an empty capture though: a feedback widget
+      //    that merely *looks* like the survey (broad `survey` selectors) must
+      //    not abort a running answer with a silent empty "success", and the
+      //    stream text is a valid answer when the DOM exposes no message node.
+      if (
+        ctx.survey &&
+        elapsed >= ctx.minAnswerWait &&
+        !streamActive &&
+        this.probe(ctx, 'survey', 500, () => SiteDriver.hasSurvey()) &&
+        idleFor >= ctx.surveySettleMs
+      ) {
+        const surveyText = ctx.lastText || (summary.text || '').trim();
+        if (surveyText) {
+          return {
+            text: surveyText,
+            stopReason: 'survey',
+            stream: summary,
+            fromStream: !ctx.lastText && Boolean(summary.text),
+          };
+        }
+        // The end-of-turn marker is on screen but neither the DOM selectors
+        // nor the stream hook produced any text: fail loudly (once the answer
+        // should have arrived) instead of returning an empty answer.
+        if (elapsed > ctx.startConfirmMs) {
+          throw new BridgeFailure(
+            'empty_answer',
+            'the turn ended (survey visible) but no answer text was captured - the markup or ' +
+              'stream format probably changed; run Diagnose DOM and check selectors.assistantMessage ' +
+              'and the capture prefixes'
+          );
+        }
       }
 
       if (ctx.lastText && elapsed >= ctx.minAnswerWait) {
