@@ -3,11 +3,13 @@
 Only the subset of the OpenAI schema that a Chat-Completions client realistically
 sends is modelled explicitly; unknown fields are accepted (``extra="allow"``) and
 ignored so that Hermes/OpenClaw/LiteLLM style clients never get a 422 for adding
-``tools`` or ``response_format``.
+``response_format`` and friends.  ``tools``/``tool_choice`` are modelled: they
+put the bridge into tool-broker mode (see ``server/toolbroker.py``).
 """
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -43,34 +45,64 @@ class ChatMessage(BaseModel):
     content: Union[str, List[Union[str, ContentPart, Dict[str, Any]]], None] = None
     name: Optional[str] = None
     tool_call_id: Optional[str] = None
+    #: OpenAI assistant tool_calls echoed back in the history of a later turn
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+
+    def render_tool_calls(self) -> str:
+        """The tool_calls of this message as the broker's JSON plan shape."""
+
+        rendered: List[Dict[str, Any]] = []
+        for call in self.tool_calls or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = call.get("name") or function.get("name")
+            arguments = call.get("arguments", function.get("arguments"))
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (ValueError, TypeError):
+                    pass
+            entry: Dict[str, Any] = {"name": name or "?"}
+            if call.get("id"):
+                entry["id"] = call["id"]
+            entry["arguments"] = arguments if arguments is not None else {}
+            rendered.append(entry)
+        return json.dumps({"tool_calls": rendered}, ensure_ascii=False, indent=2)
 
     def as_text(self) -> str:
         """Flatten the (possibly multimodal) content into plain text."""
 
         content = self.content
+        text = ""
         if content is None:
-            return ""
-        if isinstance(content, str):
-            return content
-        chunks: List[str] = []
-        for part in content:
-            if isinstance(part, str):
-                chunks.append(part)
-            elif isinstance(part, ContentPart):
-                if part.text:
-                    chunks.append(part.text)
-                elif part.image_url is not None:
-                    chunks.append("[image omitted by bridge]")
-                elif part.type:
-                    chunks.append(f"[{part.type}]")
-            elif isinstance(part, dict):
-                if isinstance(part.get("text"), str):
-                    chunks.append(part["text"])
-                elif isinstance(part.get("image_url"), (dict, str)):
-                    chunks.append("[image omitted by bridge]")
-                elif part.get("type"):
-                    chunks.append(f"[{part['type']}]")
-        return "\n".join(chunk for chunk in chunks if chunk)
+            text = ""
+        elif isinstance(content, str):
+            text = content
+        else:
+            chunks: List[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    chunks.append(part)
+                elif isinstance(part, ContentPart):
+                    if part.text:
+                        chunks.append(part.text)
+                    elif part.image_url is not None:
+                        chunks.append("[image omitted by bridge]")
+                    elif part.type:
+                        chunks.append(f"[{part.type}]")
+                elif isinstance(part, dict):
+                    if isinstance(part.get("text"), str):
+                        chunks.append(part["text"])
+                    elif isinstance(part.get("image_url"), (dict, str)):
+                        chunks.append("[image omitted by bridge]")
+                    elif part.get("type"):
+                        chunks.append(f"[{part['type']}]")
+            text = "\n".join(chunk for chunk in chunks if chunk)
+        if self.tool_calls:
+            block = self.render_tool_calls()
+            text = f"{text}\n{block}" if text else block
+        return text
 
     def is_empty(self) -> bool:
         return not self.as_text().strip()
@@ -91,6 +123,8 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = 1
     stop: Optional[Union[str, List[str]]] = None
     user: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None
 
     # --- bridge extensions (ignored by OpenAI clients) -------------------
     #: seconds to wait for the browser answer, overrides AAB_REQUEST_TIMEOUT
@@ -130,9 +164,28 @@ def estimate_tokens(text: str) -> int:
     return max(words, len(text) // 4)
 
 
+class ToolCallFunction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    arguments: str = "{}"
+
+
+class ToolCall(BaseModel):
+    """One OpenAI ``message.tool_calls`` entry (``index`` only used in SSE)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    type: str = "function"
+    function: ToolCallFunction
+    index: Optional[int] = None
+
+
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
-    content: str = ""
+    content: Optional[str] = ""
+    tool_calls: Optional[List[ToolCall]] = None
 
 
 class Choice(BaseModel):
@@ -159,6 +212,10 @@ class BridgeMeta(BaseModel):
     sanitize_findings: List[Dict[str, Any]] = Field(default_factory=list)
     browser_meta: Dict[str, Any] = Field(default_factory=dict)
     streamed: bool = False
+    tool_mode: bool = False
+    tools_offered: List[str] = Field(default_factory=list)
+    tool_calls: List[str] = Field(default_factory=list)
+    plan_parsed: bool = True
 
 
 class ChatCompletionResponse(BaseModel):
@@ -176,6 +233,7 @@ class ChatCompletionResponse(BaseModel):
 class Delta(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
 
 
 class ChunkChoice(BaseModel):

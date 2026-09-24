@@ -52,7 +52,7 @@ def test_ws_allows_arena_and_originless_clients(ws_app):
     client, _ = ws_app
     # a tab of the site itself ...
     with client.websocket_connect("/ws/browser", headers={"Origin": "https://arena.ai"}) as ws:
-        ws.send_json({"type": "hello", "client": "test", "version": "1.4.1"})
+        ws.send_json({"type": "hello", "client": "test", "version": "1.5.0"})
         assert ws.receive_json()["type"] == "welcome"
     # ...and non-browser clients that send no Origin (CLI, curl, tests)
     with client.websocket_connect("/ws/browser") as ws:

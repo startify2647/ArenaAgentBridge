@@ -54,6 +54,14 @@ from .models import (
 )
 from .prompt_builder import PromptBuildError, build_prompt
 from .sanitizer import load_rules, sanitize
+from .toolbroker import (
+    build_tool_prompt,
+    extract_tool_specs,
+    parse_plan,
+    sanitize_plan_calls,
+    stream_tool_call_deltas,
+    to_openai_tool_calls,
+)
 from .websocket_manager import BridgeError, BrowserBridge
 
 logger = logging.getLogger("aab.server")
@@ -272,8 +280,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         requested_mode = payload.mode or (
             "direct" if str(payload.model or "").endswith("-direct") else None
         )
+        # `tools` flips the bridge into tool-broker mode: the site model plans
+        # with the caller's tools and the answer comes back as standard OpenAI
+        # tool_calls (see server/toolbroker.py).
+        tool_specs = extract_tool_specs(payload.tools)
+        wants_tools = bool(tool_specs) and payload.tool_choice != "none"
+        tool_names = [spec.name for spec in tool_specs]
         try:
-            prompt, mode = build_prompt(payload.messages, settings, requested_mode)
+            if wants_tools:
+                prompt, mode = build_tool_prompt(
+                    payload.messages,
+                    settings,
+                    tool_specs,
+                    payload.tool_choice,
+                    requested_mode,
+                )
+            else:
+                prompt, mode = build_prompt(payload.messages, settings, requested_mode)
         except PromptBuildError as exc:
             history.record(
                 request_id=request_id,
@@ -316,6 +339,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     source=source,
                     client_label=client_label,
                     is_disconnected=request.is_disconnected,
+                    wants_tools=wants_tools,
+                    tool_specs=tool_specs,
+                    tool_choice=payload.tool_choice,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -381,6 +407,35 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "(request %s)", report.replacements, request_id
             )
 
+        plan = (
+            parse_plan(sanitized_text, [spec.name for spec in tool_specs])
+            if wants_tools
+            else None
+        )
+        message = ChoiceMessage(role="assistant", content=sanitized_text)
+        finish_reason = "stop"
+        called_names: List[str] = []
+        plan_parsed = True
+        if plan is not None:
+            plan_parsed = plan.parsed
+            if plan.tool_calls:
+                calls = to_openai_tool_calls(plan.tool_calls)
+                sanitize_plan_calls(
+                    calls,
+                    mode="off" if payload.no_sanitize else settings.sanitize_mode,
+                    rules=rules,
+                )
+                called_names = [call.function.name for call in calls]
+                message = ChoiceMessage(
+                    role="assistant",
+                    content=plan.final or None,
+                    tool_calls=calls,
+                )
+                finish_reason = "tool_calls"
+            elif plan.parsed:
+                # clean protocol answer (preamble stripped) for the client
+                message = ChoiceMessage(role="assistant", content=plan.final or "")
+
         meta = BridgeMeta(
             request_id=request_id,
             mode=mode,
@@ -391,13 +446,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             sanitize_mode=report.mode,
             sanitize_findings=[f.as_dict() for f in report.findings[:16]],
             browser_meta=result.get("meta") or {},
+            tool_mode=wants_tools,
+            tools_offered=tool_names,
+            tool_calls=called_names,
+            plan_parsed=plan_parsed,
         )
         response = ChatCompletionResponse(
             id=request_id,
             model=payload.model or settings.model_id,
-            choices=[
-                Choice(index=0, message=ChoiceMessage(role="assistant", content=sanitized_text))
-            ],
+            choices=[Choice(index=0, message=message, finish_reason=finish_reason)],
             usage=Usage.estimate(prompt, sanitized_text),
             x_bridge=meta,
         )
@@ -442,6 +499,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         source: str,
         client_label: str,
         is_disconnected,
+        wants_tools: bool = False,
+        tool_specs: Optional[List[Any]] = None,
+        tool_choice: Any = None,
     ) -> AsyncIterator[str]:
         """Emit an OpenAI-style SSE stream.
 
@@ -511,9 +571,52 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             if report.changed:
                 bridge.total_sanitized += 1
 
-            chunks = _split_for_stream(sanitized_text, settings.stream_chunk_chars)
-            if not chunks and sanitized_text:
-                chunks = [sanitized_text]
+            plan = (
+                parse_plan(sanitized_text, [spec.name for spec in (tool_specs or [])])
+                if wants_tools
+                else None
+            )
+            called_names: List[str] = []
+            plan_parsed = True
+            finish_reason = "stop"
+            stream_text = sanitized_text
+            if plan is not None:
+                plan_parsed = plan.parsed
+                if plan.tool_calls:
+                    calls = to_openai_tool_calls(plan.tool_calls)
+                    sanitize_plan_calls(
+                        calls,
+                        mode="off" if no_sanitize else settings.sanitize_mode,
+                        rules=rules,
+                    )
+                    called_names = [call.function.name for call in calls]
+                    stream_tool_call_deltas(calls)
+                    yield _sse(
+                        ChatCompletionChunk(
+                            id=request_id,
+                            created=created,
+                            model=model,
+                            choices=[
+                                ChunkChoice(
+                                    index=0,
+                                    delta=Delta(
+                                        role="assistant",
+                                        content=None,
+                                        tool_calls=calls,
+                                    ),
+                                )
+                            ],
+                        ).model_dump(exclude_none=True)
+                    )
+                    finish_reason = "tool_calls"
+                elif plan.parsed:
+                    stream_text = plan.final or ""
+            if finish_reason == "stop":
+                chunks = _split_for_stream(stream_text, settings.stream_chunk_chars)
+                if not chunks and stream_text:
+                    chunks = [stream_text]
+            else:
+                chunks = []
             for chunk in chunks:
                 if await is_disconnected():
                     logger.info("client disconnected mid-stream %s", request_id)
@@ -560,12 +663,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 sanitize_findings=[f.as_dict() for f in report.findings[:16]],
                 browser_meta=result.get("meta") or {},
                 streamed=True,
+                tool_mode=wants_tools,
+                tools_offered=[spec.name for spec in (tool_specs or [])],
+                tool_calls=called_names,
+                plan_parsed=plan_parsed,
             )
             final = ChatCompletionChunk(
                 id=request_id,
                 created=created,
                 model=model,
-                choices=[ChunkChoice(index=0, delta=Delta(), finish_reason="stop")],
+                choices=[ChunkChoice(index=0, delta=Delta(), finish_reason=finish_reason)],
                 x_bridge=meta,
             )
             history.record(

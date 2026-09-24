@@ -25,7 +25,7 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
-**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.4.1`
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.5.0`
 
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
@@ -45,6 +45,7 @@ touches cookies, and never stores credentials.
 - [Configuration](#configuration)
 - [Extension reference](#extension-reference)
 - [API](#api)
+- [Tool calling (function calling)](#tool-calling-function-calling)
 - [Troubleshooting](#troubleshooting)
 - [Security model](#security-model)
 - [Limitations](#limitations)
@@ -148,6 +149,7 @@ More examples (streaming, multi-turn, errors): [`tests/curl_examples.sh`](tests/
 | API key           | any value, e.g. `sk-arena`              |
 | Model ID          | `arena-agent`                           |
 | Streaming         | supported                               |
+| Tool calling     | standard OpenAI `tool_calls` loop        |
 
 Details and per-client recipes: [`docs/HERMES_OPENCLAW.md`](docs/HERMES_OPENCLAW.md).
 
@@ -306,6 +308,18 @@ kept in a small outbox and flushed on reconnect; the server, in turn, keeps an
 in-flight request alive for `AAB_RECONNECT_GRACE` seconds and re-sends it to
 the tab that reconnects in time.
 
+## Tool calling (function calling)
+
+`/v1/chat/completions` implements the standard OpenAI tools loop: send `tools`, get
+`message.tool_calls` + `finish_reason: "tool_calls"` back, execute the tools in the
+client and post `role="tool"` results on the next turn. The page model only *plans*;
+tool execution always stays on the caller's side (Hermes runs its own `terminal`,
+`web_search`, `execute_code`, ... against the real machine). `stream`, `tool_choice`
+(`auto` / `none` / `required` / a specific function) and multi-call batches are
+supported. A plan the page fails to express as JSON degrades to a plain assistant
+message instead of breaking the loop. Walkthrough:
+[`docs/HERMES_OPENCLAW.md`](docs/HERMES_OPENCLAW.md).
+
 ## API
 
 * `POST /v1/chat/completions` - Chat Completions, `stream: true/false`; extra
@@ -407,6 +421,14 @@ sanitiser false positives, Firefox permission quirks):
 * **Attachments, files and site tools can't be driven** by the bridge.
 
 ## Changelog
+
+### 1.5.0
+
+- **Tool-calling broker**: `tools`/`tool_choice` on `/v1/chat/completions` now produce
+  real OpenAI `message.tool_calls` + `finish_reason: "tool_calls"` so agent frameworks
+  (Hermes) can run their own tools in a proper call/result loop.
+- HEAD probes are answered (`curl -I`, Hermes health checks) instead of 405.
+- The bare `/v1` prefix answers with a small index instead of `{"detail":"Not Found"}`.
 
 **1.4.1** - security + weight:
 
