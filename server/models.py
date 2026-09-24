@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -38,21 +38,79 @@ class ContentPart(BaseModel):
     image_url: Optional[Any] = None
 
 
+def as_bool(value: Any, default: bool = False) -> bool:
+    """Tolerant truthiness for request fields (``"true"``, ``1``, ``"false"``...)."""
+
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+    return default
+
+
+def coerce_timeout(value: Any) -> Optional[float]:
+    """Accept a number, a numeric string, or an httpx-style timeout object."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, dict):
+        for key in ("total", "read", "timeout"):
+            if key in value:
+                try:
+                    return float(value[key])
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
 class ChatMessage(BaseModel):
+    """One conversation turn.
+
+    Every field is intentionally loose: real-world clients (Hermes, OpenClaw,
+    LiteLLM proxies, the OpenAI SDK) send numbers where the schema says string,
+    a dict where it says list, legacy ``function_call`` objects, or roles
+    outside the OpenAI set.  A real API tolerates those and so does the bridge -
+    a request body must never die on a 422.
+    """
+
     model_config = ConfigDict(extra="allow")
 
-    role: Role = "user"
-    content: Union[str, List[Union[str, ContentPart, Dict[str, Any]]], None] = None
-    name: Optional[str] = None
-    tool_call_id: Optional[str] = None
+    role: Any = "user"
+    content: Any = None
+    name: Any = None
+    tool_call_id: Any = None
     #: OpenAI assistant tool_calls echoed back in the history of a later turn
     tool_calls: Optional[List[Dict[str, Any]]] = None
+
+    def all_tool_calls(self) -> List[Dict[str, Any]]:
+        """``tool_calls`` plus the legacy single ``function_call`` field."""
+
+        calls = [c for c in (self.tool_calls or []) if isinstance(c, dict)]
+        legacy = (self.model_extra or {}).get("function_call")
+        if isinstance(legacy, dict) and legacy.get("name"):
+            calls.append(
+                {"name": legacy.get("name"), "arguments": legacy.get("arguments")}
+            )
+        return calls
 
     def render_tool_calls(self) -> str:
         """The tool_calls of this message as the broker's JSON plan shape."""
 
         rendered: List[Dict[str, Any]] = []
-        for call in self.tool_calls or []:
+        for call in self.all_tool_calls():
             if not isinstance(call, dict):
                 continue
             function = call.get("function") if isinstance(call.get("function"), dict) else {}
@@ -70,6 +128,26 @@ class ChatMessage(BaseModel):
             rendered.append(entry)
         return json.dumps({"tool_calls": rendered}, ensure_ascii=False, indent=2)
 
+    @staticmethod
+    def _part_text(part: Any) -> str:
+        if isinstance(part, str):
+            return part
+        if isinstance(part, ContentPart):
+            if part.text:
+                return part.text
+            if part.image_url is not None:
+                return "[image omitted by bridge]"
+            return f"[{part.type}]" if part.type else ""
+        if isinstance(part, dict):
+            if isinstance(part.get("text"), str):
+                return part["text"]
+            if part.get("image_url") is not None:
+                return "[image omitted by bridge]"
+            if part.get("type"):
+                return f"[{part['type']}]"
+            return ""
+        return str(part) if part is not None else ""
+
     def as_text(self) -> str:
         """Flatten the (possibly multimodal) content into plain text."""
 
@@ -79,27 +157,14 @@ class ChatMessage(BaseModel):
             text = ""
         elif isinstance(content, str):
             text = content
-        else:
-            chunks: List[str] = []
-            for part in content:
-                if isinstance(part, str):
-                    chunks.append(part)
-                elif isinstance(part, ContentPart):
-                    if part.text:
-                        chunks.append(part.text)
-                    elif part.image_url is not None:
-                        chunks.append("[image omitted by bridge]")
-                    elif part.type:
-                        chunks.append(f"[{part.type}]")
-                elif isinstance(part, dict):
-                    if isinstance(part.get("text"), str):
-                        chunks.append(part["text"])
-                    elif isinstance(part.get("image_url"), (dict, str)):
-                        chunks.append("[image omitted by bridge]")
-                    elif part.get("type"):
-                        chunks.append(f"[{part['type']}]")
+        elif isinstance(content, dict):
+            text = self._part_text(content)
+        elif isinstance(content, (list, tuple)):
+            chunks: List[str] = [self._part_text(part) for part in content]
             text = "\n".join(chunk for chunk in chunks if chunk)
-        if self.tool_calls:
+        else:
+            text = str(content)
+        if self.all_tool_calls():
             block = self.render_tool_calls()
             text = f"{text}\n{block}" if text else block
         return text
@@ -116,19 +181,23 @@ class ChatCompletionRequest(BaseModel):
 
     model: Optional[str] = None
     messages: List[ChatMessage] = Field(default_factory=list)
-    stream: bool = False
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    max_tokens: Optional[int] = None
-    n: Optional[int] = 1
-    stop: Optional[Union[str, List[str]]] = None
-    user: Optional[str] = None
+    # sampling/top-level knobs are decorative (the page model is what it is) -
+    # they are accepted in any shape real clients emit and never reject a body
+    stream: Any = False
+    temperature: Any = None
+    top_p: Any = None
+    max_tokens: Any = None
+    n: Any = 1
+    stop: Any = None
+    user: Any = None
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Any] = None
 
     # --- bridge extensions (ignored by OpenAI clients) -------------------
-    #: seconds to wait for the browser answer, overrides AAB_REQUEST_TIMEOUT
-    timeout: Optional[float] = None
+    #: seconds to wait for the browser answer, overrides AAB_REQUEST_TIMEOUT.
+    #: Loose on purpose: some clients leak an httpx timeout object here
+    #: (``{"total": 600, "connect": 5}``) - coerce_timeout() makes sense of it.
+    timeout: Any = None
     #: ``agent`` (default) or ``direct``
     mode: Optional[str] = None
     #: skip the destructive-command sanitiser for this request

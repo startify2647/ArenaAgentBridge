@@ -145,7 +145,7 @@ The server checks **who** is dialing in, not just **what** they say:
 ### Extension → server
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.5.0","url":"https://arena.ai/agent","token":"…"}
+{"type":"hello","client":"chrome-extension","version":"1.5.1","url":"https://arena.ai/agent","token":"…"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"text or null","error":null,

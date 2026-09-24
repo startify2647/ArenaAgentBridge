@@ -146,7 +146,7 @@ data: [DONE]
 ### افزونه → سرور
 
 ```jsonc
-{"type":"hello","client":"chrome-extension","version":"1.5.0","url":"https://arena.ai/agent","token":"…"}
+{"type":"hello","client":"chrome-extension","version":"1.5.1","url":"https://arena.ai/agent","token":"…"}
 {"type":"heartbeat","state":"idle|answering","busy":false,"url":"https://arena.ai/agent"}
 {"type":"pong","ts":1712345678.9}
 {"type":"response","id":"<uuid>","response":"متن یا null","error":null,

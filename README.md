@@ -25,7 +25,7 @@ Everything runs on your machine. The browser talks to the public website exactly
 as it normally would; the bridge never sends your data anywhere else, never
 touches cookies, and never stores credentials.
 
-**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.5.0`
+**Languages:** English (this file) · [فارسی](README.fa.md) · **Version:** `1.5.1`
 
 > ⚠️ **Read this first.** Automating the site this way very likely violates
 > Arena.ai's Terms of Service and your account may be limited or banned. The
@@ -421,6 +421,15 @@ sanitiser false positives, Firefox permission quirks):
 * **Attachments, files and site tools can't be driven** by the bridge.
 
 ## Changelog
+
+### 1.5.1
+
+- Request-body tolerance: `timeout` may be an httpx-style object (`{"total": 600}`),
+  `stream`/flags accept `"true"`/`"false"` strings, `user` may be numeric, content
+  may be a single part dict, legacy `function_call` history is rendered - Hermes-class
+  clients no longer trip over cosmetic schema mismatches.
+- Malformed API bodies answer with an OpenAI-style 400 JSON error (clear message)
+  instead of FastAPI's bare 422; the admin surface keeps 422.
 
 ### 1.5.0
 

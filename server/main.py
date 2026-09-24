@@ -27,6 +27,7 @@ import urllib.parse
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
@@ -50,6 +51,8 @@ from .models import (
     ModelCard,
     ModelList,
     Usage,
+    as_bool,
+    coerce_timeout,
     new_id,
 )
 from .prompt_builder import PromptBuildError, build_prompt
@@ -272,6 +275,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         started = time.time()
         request_id = new_id()
         source, client_label = request_context(request)
+        stream_flag = as_bool(payload.stream, default=False)
         #: what the client sent, preamble excluded - the panel's history shows this
         conversation = _dump_messages(payload)
 
@@ -304,7 +308,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 client=client_label,
                 model=payload.model or settings.model_id,
                 mode=payload.mode or settings.default_mode,
-                streamed=bool(payload.stream),
+                streamed=stream_flag,
                 status="rejected",
                 http_status=400,
                 error_code="invalid_messages",
@@ -317,11 +321,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if payload.model and payload.model not in settings.model_ids:
             logger.info("client asked for unknown model %r - serving %s", payload.model, settings.model_id)
 
-        timeout = settings.clamp_timeout(payload.timeout)
-        if payload.n and payload.n > 1:
+        timeout = settings.clamp_timeout(coerce_timeout(payload.timeout))
+        try:
+            n_choices = int(payload.n) if payload.n is not None else 1
+        except (TypeError, ValueError):
+            n_choices = 1
+        if n_choices > 1:
             logger.warning("n=%s requested; the bridge always returns a single choice", payload.n)
 
-        if payload.stream:
+        if stream_flag:
             return StreamingResponse(
                 _stream_response(
                     bridge=bridge,
@@ -875,6 +883,33 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 await ws.close()
 
     # ------------------------------------------------------------------
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """OpenAI-style 400 for malformed API bodies (FastAPI would answer 422).
+
+        The admin surface keeps the native 422 contract.
+        """
+
+        if not request.url.path.startswith(("/v1", "/chat/completions", "/models")):
+            return JSONResponse(status_code=422, content={"detail": exc.errors()})
+        parts = []
+        for err in exc.errors()[:8]:
+            loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body") or "body"
+            parts.append(f"{loc}: {err.get('msg', 'invalid value')}")
+        message = "invalid request body - " + "; ".join(parts)
+        logger.warning("request validation failed: %s", message)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "message": message,
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": "invalid_body",
+                }
+            },
+        )
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
         return _error(exc.status_code, str(exc.detail), err_type="authentication_error"
